@@ -20,8 +20,8 @@ namespace QualifiedImmunity
         // ---- Config ([AmbientPolice] in QualifiedImmunity.ini) ----
         private bool _enabled = true;
         private int _maxEvents = 2;
-        private float _spawnIntervalMin = 25f;
-        private float _spawnIntervalMax = 55f;
+        private float _spawnIntervalMin = 35f;
+        private float _spawnIntervalMax = 75f;
         private float _spawnDistMin = 60f;
         private float _spawnDistMax = 130f;
         private const float DespawnDist = 300f;   // events past this from the player are torn down
@@ -148,12 +148,14 @@ namespace QualifiedImmunity
 
         private EType PickType()
         {
+            // Weighted toward routine stops/arrests; the dangerous chases/gunfights are the
+            // minority so they stay special (toned down from before).
             int r = _rng.Next(100);
-            if (r < 26) return EType.TrafficStop; // 26%
-            if (r < 46) return EType.Arrest;      // 20%
-            if (r < 66) return EType.Resist;      // 20%
-            if (r < 88) return EType.Gunfight;    // 22%
-            return EType.Gang;                     // 12%
+            if (r < 34) return EType.TrafficStop; // 34%
+            if (r < 58) return EType.Arrest;      // 24%
+            if (r < 76) return EType.Resist;      // 18%
+            if (r < 92) return EType.Gunfight;    // 16%
+            return EType.Gang;                     //  8%
         }
 
         // A pulled-over scene: civ vehicle at the node, cruiser behind with lights on, an
@@ -161,12 +163,24 @@ namespace QualifiedImmunity
         private void BuildStop(Ev ev, Vector3 spot, float heading)
         {
             Vector3 fwd = HeadingToVector(heading);
-            ev.SuspectCar = SpawnVehicle(VehiclePool(), spot, heading);
-            if (ev.SuspectCar == null) return;
-            ev.CopCar = SpawnVehicle(VehicleHash.Police3, spot - fwd * 7f, heading);
+            // Only a traffic stop keeps the subject in a vehicle. Arrest/Resist put them on
+            // FOOT -- you can't taze-ragdoll or hands-up a ped that's sitting in a car seat.
+            bool vehicleStop = (ev.Type == EType.TrafficStop);
+
+            ev.CopCar = SpawnVehicle(VehicleHash.Police3, spot - fwd * 8f, heading);
             if (ev.CopCar != null) ev.CopCar.IsSirenActive = true;
 
-            Ped suspect = SpawnSuspect(ev.SuspectCar, VehicleSeat.Driver, Vector3.Zero, 0);
+            Ped suspect;
+            if (vehicleStop)
+            {
+                ev.SuspectCar = SpawnVehicle(VehiclePool(), spot, heading);
+                suspect = ev.SuspectCar != null
+                    ? SpawnSuspect(ev.SuspectCar, VehicleSeat.Driver, Vector3.Zero, 0) : null;
+            }
+            else
+            {
+                suspect = SpawnSuspect(null, VehicleSeat.None, spot + RightOf(heading) * 2.0f, 0);
+            }
             if (suspect != null) ev.Suspects.Add(suspect);
 
             Ped cop = ev.CopCar != null ? SpawnCop(ev.CopCar, VehicleSeat.Driver, Vector3.Zero)
@@ -174,7 +188,7 @@ namespace QualifiedImmunity
             if (cop != null)
             {
                 ev.Cops.Add(cop);
-                // Step out and walk up to the driver's window.
+                // Step out and walk up to the subject.
                 if (Valid(suspect))
                     Function.Call(Hash.TASK_GO_TO_ENTITY, cop, suspect, -1, 1.5f, 1.6f, 1073741824.0f, 0);
             }

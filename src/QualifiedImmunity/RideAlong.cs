@@ -30,8 +30,8 @@ namespace QualifiedImmunity
         private float _pitDistanceThreshold = 16.0f;
         private float _pitMinSpeed = 7.0f;
         private float _pitCooldownSeconds = 8.0f;
-        private float _engageDistanceThreshold = 38.0f;
-        private float _engageSpeedThreshold = 11.0f;
+        private float _engageDistanceThreshold = 16.0f; // only bail out of the car when right on top
+        private float _engageSpeedThreshold = 6.0f;     // ...of a suspect that's actually slowed/cornered
         private float _idealFollowDistance = 16.0f;
         private float _escapeDistance = 160.0f;
         private float _escapeTimeLimit = 25.0f;
@@ -39,8 +39,8 @@ namespace QualifiedImmunity
         // Pacing the player can tune in the .ini without a rebuild.
         private float _pursuitDelayMin = 25.0f;   // gap before the next pursuit kicks off
         private float _pursuitDelayMax = 55.0f;
-        private float _radioIntervalMin = 30.0f;  // gap between unhinged radio lines
-        private float _radioIntervalMax = 55.0f;
+        private float _radioIntervalMin = 45.0f;  // gap between unhinged radio lines
+        private float _radioIntervalMax = 85.0f;
         private bool _showDebugHud = false;        // the cyan QI diagnostic overlay (dev only)
         private float _driverAggressiveness = 0.3f; // 0=calm/road-following, 1=reckless
         private float _spawnDistanceMin = 75.0f;   // how far off the unit spawns to drive in
@@ -54,6 +54,8 @@ namespace QualifiedImmunity
         private bool _phoneOpen;
         private int _phoneIndex;
         private DateTime _phoneOpenedAt = DateTime.MinValue;
+        private int _phoneRingSound = -1;   // looping ring -- must be stopped explicitly
+        private bool _phoneConnected;       // ring done, menu showing
         private const double PhoneRingSeconds = 1.8;
 
         // Configured baselines for the three values the player can nudge live via
@@ -206,12 +208,13 @@ namespace QualifiedImmunity
             "Civilian was interfering with an active pursuit! Pushing through!"
         };
 
-        // Driving style bitflag: stop at lights off, overtake, avoid cars - a brisk response.
+        // LAW-ABIDING style (DrivingStyle.Normal): stops at red lights, stops for traffic
+        // and pedestrians, stays on the road. Used for all NORMAL driving -- en route,
+        // patrol, responding -- so the AI drives like a real-life driver.
         private const int DRIVE_STYLE = 786603;
 
-        // Ride-along host's style: weave through traffic, never sit in formation or
-        // stop at lights. Paired with full driver skill + steer-around + navmesh
-        // pathing, it threads cars cleanly instead of plowing into them.
+        // PURSUIT style: weave through traffic and run lights to keep up with a fleeing
+        // suspect. Only used during active chases/PITs -- never for normal driving.
         private const int RIDE_DRIVE_STYLE = 786468; // DrivingStyle.AvoidTraffic
 
         // How far around the cruiser we look for other cops already in a fight.
@@ -331,17 +334,33 @@ namespace QualifiedImmunity
         {
             Ped player = Game.Player.Character;
             if (player == null || !player.Exists() || player.IsDead) return;
+            StopPhoneRing();   // clear any prior ring so the sound id can't leak on a re-open
             _phoneOpen = true;
+            _phoneConnected = false;
             _phoneIndex = 0;
             _phoneOpenedAt = DateTime.Now;
             // Put the phone to the player's ear and play a dial/ring so it reads as a call.
             Function.Call(Hash.TASK_USE_MOBILE_PHONE_TIMED, player, 30000);
-            Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, "Dial_and_Remote_Ring", "Phone_SoundSet_Default", true);
+            // Own the sound id so we can STOP the looping ring (the bug: it never stopped).
+            _phoneRingSound = Function.Call<int>(Hash.GET_SOUND_ID);
+            Function.Call(Hash.PLAY_SOUND_FRONTEND, _phoneRingSound, "Dial_and_Remote_Ring", "Phone_SoundSet_Default", true);
+        }
+
+        private void StopPhoneRing()
+        {
+            if (_phoneRingSound != -1)
+            {
+                Function.Call(Hash.STOP_SOUND, _phoneRingSound);
+                Function.Call(Hash.RELEASE_SOUND_ID, _phoneRingSound);
+                _phoneRingSound = -1;
+            }
         }
 
         private void ClosePhone()
         {
             _phoneOpen = false;
+            _phoneConnected = false;
+            StopPhoneRing();
             Ped player = Game.Player.Character;
             if (player != null && player.Exists() && !player.IsInVehicle())
                 Function.Call(Hash.CLEAR_PED_TASKS, player); // put the phone away
@@ -363,6 +382,8 @@ namespace QualifiedImmunity
                 DrawPhoneBox("DISPATCH", new string[] { "...ringing..." }, -1);
                 return;
             }
+            // Connected -> kill the ring (once).
+            if (!_phoneConnected) { _phoneConnected = true; StopPhoneRing(); }
 
             // Context-sensitive options: request when idle, cancel when a ride is active.
             bool active = _phase != Phase.Idle;
@@ -397,25 +418,55 @@ namespace QualifiedImmunity
                 "HUD_FRONTEND_DEFAULT_SOUNDSET", true);
         }
 
+        // Native-styled menu (GTA's own fonts/banner/highlight) so the dispatch UI looks
+        // like it belongs in the game rather than a plain text overlay.
         private void DrawPhoneBox(string title, string[] options, int sel)
         {
-            // Dark backdrop sized to the option count (0-1 screen space).
-            float h = 0.045f + 0.032f * options.Length;
-            Function.Call(Hash.DRAW_RECT, 0.165f, 0.40f + h / 2f, 0.235f, h, 0, 0, 0, 190);
+            const float x = 0.118f;       // left edge (0-1 screen space), like the interaction menu
+            const float w = 0.215f;       // panel width (wide enough for the longest option)
+            const float top = 0.26f;      // top of the banner
+            const float hdrH = 0.05f;     // banner height
+            const float itemH = 0.035f;   // row height
+            float cx = x + w / 2f;
 
-            float px = 38f, py = 268f, lineH = 26f;
-            new GTA.UI.TextElement("~b~" + title, new System.Drawing.PointF(px, py), 0.45f,
-                System.Drawing.Color.White).Draw();
+            // Title banner (dark navy, like LSPD dispatch).
+            Function.Call(Hash.DRAW_RECT, cx, top + hdrH / 2f, w, hdrH, 12, 28, 56, 235);
+            DrawMenuText(title, x + 0.007f, top + 0.010f, 0.38f, 4, 245, 245, 245, false);
+
             for (int i = 0; i < options.Length; i++)
             {
+                float ry = top + hdrH + itemH * i;
                 bool s = (i == sel);
-                System.Drawing.Color col = s ? System.Drawing.Color.Yellow : System.Drawing.Color.White;
-                new GTA.UI.TextElement((s ? "> " : "   ") + options[i],
-                    new System.Drawing.PointF(px, py + lineH * (i + 1)), 0.4f, col).Draw();
+                // Selected row gets the white highlight bar with dark text (native style).
+                if (s) Function.Call(Hash.DRAW_RECT, cx, ry + itemH / 2f, w, itemH, 240, 240, 240, 255);
+                else   Function.Call(Hash.DRAW_RECT, cx, ry + itemH / 2f, w, itemH, 0, 0, 0, 160);
+                int t = s ? 15 : 235;
+                DrawMenuText(options[i], x + 0.009f, ry + 0.006f, 0.34f, 0, t, t, t, false);
             }
-            new GTA.UI.TextElement("[Arrows] Navigate  [Enter] Select  [Esc] Hang up",
-                new System.Drawing.PointF(px, py + lineH * (options.Length + 1)), 0.3f,
-                System.Drawing.Color.LightGray).Draw();
+
+            // Footer hint strip (only once the menu is interactive, i.e. not during the ring).
+            // Plain words -- ~INPUT~ glyph tokens don't render through this text path.
+            if (sel >= 0)
+            {
+                float fy = top + hdrH + itemH * options.Length;
+                Function.Call(Hash.DRAW_RECT, cx, fy + itemH / 2f, w, itemH, 0, 0, 0, 200);
+                DrawMenuText("Up/Down: Move    Enter: Select    Esc: Hang up",
+                    x + 0.009f, fy + 0.008f, 0.27f, 0, 200, 200, 200, false);
+            }
+        }
+
+        // Draw text with the game's native text renderer (proper menu font + drop shadow),
+        // so it matches GTA's own UI instead of the flat TextElement overlay.
+        private void DrawMenuText(string text, float x, float y, float scale, int font, int r, int g, int b, bool center)
+        {
+            Function.Call(Hash.SET_TEXT_FONT, font);
+            Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
+            Function.Call(Hash.SET_TEXT_COLOUR, r, g, b, 255);
+            Function.Call(Hash.SET_TEXT_DROP_SHADOW);
+            Function.Call(Hash.SET_TEXT_CENTRE, center);
+            Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
+            Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
+            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, x, y, 0);
         }
 
         // -------------------------------------------------------------------
@@ -514,7 +565,7 @@ namespace QualifiedImmunity
             }
 
             _copCar.IsEngineRunning = true;
-            _copCar.IsSirenActive = true;
+            _copCar.IsSirenActive = false; // roll in calm/unassuming -- the siren makes every NPC panic
 
             RideAlongRegistry.FriendlyCops.Clear();
             if (Valid(_driver)) RideAlongRegistry.FriendlyCops.Add(_driver.Handle);
@@ -619,14 +670,16 @@ namespace QualifiedImmunity
             // scenario without ejecting the ped from the seat.
             if (hardReset) Function.Call(Hash.CLEAR_PED_TASKS, _driver);
 
+            // Calm cruising speed (16 m/s) and a SMALL stop range (4m) so the unit drives in
+            // like normal traffic and pulls right up next to the player, not 8m short.
             if (_driveMethod >= 2)
-                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 20.0f, DRIVE_STYLE);
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 16.0f, DRIVE_STYLE);
             else if (_driveMethod == 1)
                 Function.Call(Hash.TASK_VEHICLE_MISSION_PED_TARGET, _driver, _copCar, player,
-                    4, 20.0f, DRIVE_STYLE, 12.0f, 5.0f, false); // 4 == MISSION_GOTO
+                    4, 16.0f, DRIVE_STYLE, 4.0f, 5.0f, false); // 4 == MISSION_GOTO
             else
                 Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
-                    player.Position.X, player.Position.Y, player.Position.Z, 20.0f, DRIVE_STYLE, 8.0f);
+                    player.Position.X, player.Position.Y, player.Position.Z, 16.0f, DRIVE_STYLE, 4.0f);
         }
 
         private bool _announcedLoad;
@@ -637,7 +690,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V5.3:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V5.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -739,13 +792,16 @@ namespace QualifiedImmunity
                         // (it never gets off 0.0). Leave the task alone so it can actually run.
                         bool isFirstIssue = (_lastReissue == DateTime.MinValue);
                         double sinceReissue = (DateTime.Now - _lastReissue).TotalSeconds;
-                        if (dist >= 18f && (isFirstIssue || sinceReissue > 10.0))
+                        // Keep refreshing the destination until it's nearly on top of the player
+                        // (was 18m) so it actually pulls all the way up rather than stopping short.
+                        if (dist >= 10f && (isFirstIssue || sinceReissue > 10.0))
                         {
                             _lastReissue = DateTime.Now;
                             IssueEnRouteDrive(player, isFirstIssue);
                         }
 
-                        if (dist < 20f || (_copCar.Speed < 1f && dist < 30f && (DateTime.Now - _lastProgress).TotalSeconds > 5))
+                        // Arrive CLOSE (was 20m): the unit pulls right up next to the player.
+                        if (dist < 8f || (_copCar.Speed < 1f && dist < 25f && (DateTime.Now - _lastProgress).TotalSeconds > 5))
                         {
                             // Release the KEEP_TASK lock from the en-route drive so the
                             // upcoming boarding/patrol tasks apply cleanly (the car is now
@@ -792,7 +848,7 @@ namespace QualifiedImmunity
                             if (Valid(_partner)) Function.Call(Hash.CLEAR_PED_TASKS, _partner);
 
                             // Issue driving wander directly
-                            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, RIDE_DRIVE_STYLE);
+                            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, DRIVE_STYLE);
                             _lastWander = DateTime.Now;
                             _lastCarMoving = DateTime.Now; // prevent immediate CarStalled triggering
                             SetPhase(Phase.Riding);
@@ -855,7 +911,7 @@ namespace QualifiedImmunity
                         if (CarStalled() && (DateTime.Now - _lastWander).TotalSeconds > 6.0)
                         {
                             _lastWander = DateTime.Now;
-                            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, RIDE_DRIVE_STYLE);
+                            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, DRIVE_STYLE);
                         }
 
                         if ((DateTime.Now - _lastEngageScan).TotalSeconds > 1.5)

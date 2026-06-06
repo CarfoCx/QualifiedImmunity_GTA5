@@ -90,7 +90,7 @@ namespace QualifiedImmunity
             if (!Valid(_driver) || !Valid(_threat) || !_driver.IsInVehicle(_copCar)) return;
             Vector3 t = _threat.Position;
             Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
-                t.X, t.Y, t.Z, 22.0f, RIDE_DRIVE_STYLE, 10.0f);
+                t.X, t.Y, t.Z, 22.0f, DRIVE_STYLE, 10.0f); // lawful response driving
             if (Valid(_partner)) DriveBy(_partner, _threat);
         }
 
@@ -104,6 +104,13 @@ namespace QualifiedImmunity
         private void CombatThreatPed(Ped c, Ped t)
         {
             if (!Valid(c) || !Valid(t)) return;
+            // Make them actually FIGHT on foot. The driving phase leaves the event-block on
+            // and CanLeaveVehicle off -- so when they pile out to back up local PD they just
+            // stand there frozen. Clear the block and allow leaving/advancing first.
+            Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, false);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, true);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_AlwaysFight, true);
+            Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, c, 2); // advance
             if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, c, t)) return;   // already on it
             Function.Call(Hash.TASK_COMBAT_PED, c, t, 0, 16);
         }
@@ -184,9 +191,9 @@ namespace QualifiedImmunity
             // Fallback: warp a genuinely stuck officer back in so the unit is never
             // stranded -- but only after giving the walk-in animation real time to play
             // (was 12s/14s, which often cut the animation off and looked like a teleport).
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 22)
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 14)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 24)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 16)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.
@@ -217,10 +224,11 @@ namespace QualifiedImmunity
         private void ReboardCop(Ped c, int seat)
         {
             if (!Valid(c) || c.IsInVehicle(_copCar)) return;
-            // CRITICAL: ForceOutAndFight set CanUseVehicles=false to bail them out for the
-            // gunfight. While that's false, TASK_ENTER_VEHICLE can't run -- the cop just
-            // stands there until the warp fallback teleports them in (no animation). Re-
-            // enable vehicle use so they actually walk up and climb in with the animation.
+            // CRITICAL: the combat "finish them" task was locked on with KEEP_TASK; while
+            // that lock is on, the ped REJECTS the enter-vehicle task and just stands there.
+            // Release it first so they accept the re-board. (Also re-enable vehicle use,
+            // which ForceOutAndFight had turned off for the on-foot gunfight.)
+            Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanUseVehicles, true);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, false);
             Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, true); // don't bail out to react

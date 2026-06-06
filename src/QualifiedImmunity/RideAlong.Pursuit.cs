@@ -49,7 +49,10 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_DRIVER_ABILITY, _suspect, 1.0f);
             Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, _suspect, 1.0f);
             Function.Call(Hash.SET_PED_KEEP_TASK, _suspect, true);
-            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _suspect, _suspectCar, _suspectsInnocent ? 32.0f : 45.0f, DRIVE_STYLE);
+            Function.Call(Hash.SET_PED_FLEE_ATTRIBUTES, _suspect, 0, false); // don't bail the car early
+            // Drive off fast. WANDER reliably keeps the suspect MOVING (the mission-flee
+            // native left them sitting still, which killed the chase); the cruiser chases it.
+            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _suspect, _suspectCar, _suspectsInnocent ? 35.0f : 50.0f, RIDE_DRIVE_STYLE);
             Notify(SuspectThreatLine());
 
             // Your unit: into the pursuit-cop group, armed, lights on, chasing.
@@ -130,6 +133,21 @@ namespace QualifiedImmunity
 
         private void PursuitTick()
         {
+            // Keep the chase locked onto a LIVE suspect. If the designated suspect dies but
+            // others are still running (multi-suspect / gang pursuits), re-point at one that's
+            // actually alive and force a fresh chase task -- otherwise the driver keeps trying
+            // to chase a corpse and looks confused.
+            if (!_engaged && !Valid(_suspect))
+            {
+                Ped a = AliveSuspect();
+                if (a != null)
+                {
+                    _suspect = a;
+                    if (Valid(a.CurrentVehicle)) _suspectCar = a.CurrentVehicle;
+                    _lastReissue = DateTime.MinValue;   // re-issue the chase at the new target
+                }
+            }
+
             // Unhinged radio chatter -- sparse so it's an occasional punchline, not a
             // constant stream. Interval is tunable in the .ini (defaults 30-55s).
             if ((DateTime.Now - _lastRadio).TotalSeconds > _radioDelay)
@@ -178,6 +196,9 @@ namespace QualifiedImmunity
                     MakeRideAlongDriver(_driver);
                     if (Valid(_partner)) MakeRideAlongDriver(_partner);
 
+                    // Release the combat KEEP_TASK lock first, or they reject the re-board.
+                    if (Valid(_driver)) Function.Call(Hash.SET_PED_KEEP_TASK, _driver, false);
+                    if (Valid(_partner)) Function.Call(Hash.SET_PED_KEEP_TASK, _partner, false);
                     if (Valid(_driver)) Function.Call(Hash.TASK_ENTER_VEHICLE, _driver, _copCar, -1, -1, 2.0f, 1, 0);
                     if (Valid(_partner)) Function.Call(Hash.TASK_ENTER_VEHICLE, _partner, _copCar, -1, -1, 2.0f, 1, 0);
                     return;
@@ -267,7 +288,14 @@ namespace QualifiedImmunity
         {
             Ped t = AliveSuspect();
             if (!Valid(c) || t == null) return;
+            // Make sure they're armed, hostile to the suspect, and COMMIT to the kill (keep
+            // the combat task so it isn't dropped) -- this is the "shoot them dead" finish.
+            Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, c, _copsGroup);
+            if (!Function.Call<bool>(Hash.IS_PED_ARMED, c, 7))
+                Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)WeaponHash.CombatPistol), 250, false, true);
+            Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, false);
             Function.Call(Hash.TASK_COMBAT_PED, c, t, 0, 16);
+            Function.Call(Hash.SET_PED_KEEP_TASK, c, true);
         }
 
         // Aggressive engage: drop the vehicle and open fire immediately instead of

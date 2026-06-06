@@ -254,7 +254,9 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_STEERS_AROUND_VEHICLES, cop, true);
             Function.Call(Hash.SET_PED_STEERS_AROUND_OBJECTS, cop, true);
             Function.Call(Hash.SET_PED_STEERS_AROUND_PEDS, cop, true);
-            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, cop, CA_PreferNavmeshInChase, true);
+            // Follow the ROAD network, not navmesh shortcuts across sidewalks/terrain --
+            // keeps even ambient cops driving like real drivers instead of off-roading.
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, cop, CA_PreferNavmeshInChase, false);
         }
 
         private void MaybeCollateral(Ped cop, Ped player)

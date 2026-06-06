@@ -23,6 +23,7 @@ namespace QualifiedImmunity
         // then the ambulance drives in from a distance (it isn't spawned on top of the body).
         private float _dispatchDelayMin = 12f;
         private float _dispatchDelayMax = 35f;
+        private bool _emsNotifications = false;   // ticker spam about body pickups; off by default
 
         // EnRoute: driving in. OnFoot: attendant walking to the body. Tending: medic
         // kneeling over the corpse. Carrying: attendant hauling the body to the wagon.
@@ -54,7 +55,7 @@ namespace QualifiedImmunity
         private readonly Random _rng = new Random();
 
         // Brisk but careful driving: avoid traffic, steer around obstacles.
-        private const int AMBULANCE_DRIVE_STYLE = 786468; // DrivingStyle.AvoidTraffic
+        private const int AMBULANCE_DRIVE_STYLE = 786603; // DrivingStyle.Normal -- obeys traffic laws
 
         public BodyRecovery()
         {
@@ -94,6 +95,7 @@ namespace QualifiedImmunity
             _maxBodies     = s.GetValue("Bodies", "MaxPersistentBodies", _maxBodies);
             _dispatchDelayMin = s.GetValue("Bodies", "DispatchDelayMinSeconds", _dispatchDelayMin);
             _dispatchDelayMax = s.GetValue("Bodies", "DispatchDelayMaxSeconds", _dispatchDelayMax);
+            _emsNotifications = s.GetValue("Bodies", "EmsNotifications", _emsNotifications);
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -222,7 +224,8 @@ namespace QualifiedImmunity
                 Stage = Stage.EnRoute, Since = DateTime.Now
             };
             _jobs.Add(job);
-            GTA.UI.Notification.PostTicker("~b~EMS:~w~ Ambulance dispatched to recover a body.", false);
+            if (_emsNotifications)
+                GTA.UI.Notification.PostTicker("~b~EMS:~w~ Ambulance dispatched to recover a body.", false);
         }
 
         private void UpdateRecoveries()
@@ -314,7 +317,8 @@ namespace QualifiedImmunity
                         {
                             if (body != null && body.Exists()) Function.Call(Hash.DETACH_ENTITY, body, true, true);
                             RemoveBody(r.Body);                           // body goes into the back
-                            GTA.UI.Notification.PostTicker("~b~EMS:~w~ Body recovered.", false);
+                            if (_emsNotifications)
+                                GTA.UI.Notification.PostTicker("~b~EMS:~w~ Body recovered.", false);
                             if (Valid(r.Attendant) && !r.Attendant.IsInVehicle(r.Van))
                                 Function.Call(Hash.TASK_ENTER_VEHICLE, r.Attendant, r.Van, 20000, 0, 2.0f, 1, 0);
                             r.Stage = Stage.Leaving;
