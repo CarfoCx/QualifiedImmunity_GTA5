@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Qualified Immunity — Layer 1 tuning reference for dispatch.meta
+
+  *** READ THIS FIRST ***
+  dispatch.meta differs between GTA V versions. Do NOT drop this file in blind.
+  Extract YOUR game's dispatch.meta with OpenIV
+  (update\update.rpf\common\data\ai\dispatch.meta), then change the values
+  called out below inside that file. The tag names here match the vanilla
+  schema, but your file is the source of truth for which <Item> entries exist.
+
+  Goal: cops arrive FAST, in FORCE, and ESCALATE early — the "tactical
+  competence" half of the mod. The grudge/taunt/civilian behavior is Layer 2.
+-->
+<CDispatchData>
+
+  <!-- ============================================================
+       1) ORDER DISTANCES — how far out units start coordinating.
+       Bigger = they engage/converge from further away (less "poof in
+       behind you", more them driving in hard from distance).
+       ============================================================ -->
+  <DispatchOrderDistances>
+    <Item>
+      <DispatchType>DT_PoliceAutomobile</DispatchType>
+      <OnFootOrderDistance value="120.0"/>      <!-- vanilla ~80  -->
+      <MinInVehicleOrderDistance value="300.0"/><!-- vanilla ~200 -->
+      <MaxInVehicleOrderDistance value="500.0"/><!-- vanilla ~350 -->
+    </Item>
+    <Item>
+      <DispatchType>DT_PoliceHelicopter</DispatchType>
+      <OnFootOrderDistance value="200.0"/>
+      <MinInVehicleOrderDistance value="400.0"/>
+      <MaxInVehicleOrderDistance value="650.0"/>
+    </Item>
+  </DispatchOrderDistances>
+
+  <!-- ============================================================
+       2) WANTED RESPONSE — the core. Per wanted level, which services
+       dispatch and how many bodies. Crank counts up and pull heavy
+       units (SWAT/NOOSE/heli/army) down to lower stars.
+
+       Edit the matching <WantedLevelN> blocks in your file. Key knobs
+       inside each <DispatchServices>/<Item>:
+         <NumPedsToSpawn>      raise for more cops
+         <DispatchVehicleSet>  which vehicle set
+       And per wanted level:
+         <PedModelHashSetName>, <VehicleSetName>
+       ============================================================ -->
+  <WantedResponses>
+
+    <!-- 1 STAR: vanilla = a lone car. We make it two cars, aggressive. -->
+    <WantedLevel1>
+      <DispatchServices>
+        <Item>
+          <Dispatch>DT_PoliceAutomobile</Dispatch>
+          <NumPedsToSpawn value="4"/>          <!-- vanilla 2 -->
+        </Item>
+      </DispatchServices>
+    </WantedLevel1>
+
+    <!-- 2 STARS: bring the chopper in early + more cars. -->
+    <WantedLevel2>
+      <DispatchServices>
+        <Item>
+          <Dispatch>DT_PoliceAutomobile</Dispatch>
+          <NumPedsToSpawn value="8"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_PoliceHelicopter</Dispatch>
+          <NumPedsToSpawn value="2"/>          <!-- vanilla: WL3+ -->
+        </Item>
+      </DispatchServices>
+    </WantedLevel2>
+
+    <!-- 3 STARS: NOOSE/roadblocks join. -->
+    <WantedLevel3>
+      <DispatchServices>
+        <Item>
+          <Dispatch>DT_PoliceAutomobile</Dispatch>
+          <NumPedsToSpawn value="10"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_PoliceHelicopter</Dispatch>
+          <NumPedsToSpawn value="2"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_PoliceRoadBlock</Dispatch>
+          <NumPedsToSpawn value="4"/>          <!-- vanilla: WL4+ -->
+        </Item>
+        <Item>
+          <Dispatch>DT_Swat</Dispatch>
+          <NumPedsToSpawn value="4"/>          <!-- vanilla: WL4+ -->
+        </Item>
+      </DispatchServices>
+    </WantedLevel3>
+
+    <!-- 4 STARS: FIB + heavier SWAT + a second chopper. -->
+    <WantedLevel4>
+      <DispatchServices>
+        <Item>
+          <Dispatch>DT_PoliceAutomobile</Dispatch>
+          <NumPedsToSpawn value="12"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_PoliceHelicopter</Dispatch>
+          <NumPedsToSpawn value="4"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_Swat</Dispatch>
+          <NumPedsToSpawn value="8"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_PoliceRoadBlock</Dispatch>
+          <NumPedsToSpawn value="6"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_FireDepartment</Dispatch>
+          <NumPedsToSpawn value="2"/>          <!-- they cause fires -->
+        </Item>
+      </DispatchServices>
+    </WantedLevel4>
+
+    <!-- 5 STARS: full war — army vehicle + SWAT heli. -->
+    <WantedLevel5>
+      <DispatchServices>
+        <Item>
+          <Dispatch>DT_PoliceAutomobile</Dispatch>
+          <NumPedsToSpawn value="14"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_Swat</Dispatch>
+          <NumPedsToSpawn value="12"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_SwatHelicopter</Dispatch>
+          <NumPedsToSpawn value="4"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_ArmyVehicle</Dispatch>
+          <NumPedsToSpawn value="4"/>
+        </Item>
+        <Item>
+          <Dispatch>DT_PoliceRoadBlock</Dispatch>
+          <NumPedsToSpawn value="8"/>
+        </Item>
+      </DispatchServices>
+    </WantedLevel5>
+
+  </WantedResponses>
+
+  <!-- ============================================================
+       3) SPAWN TIMING — how quickly the next wave shows up.
+       LOWER min/max = faster, more relentless waves. These knobs may
+       live in your file as PoliceAutomobileSpawnSettings or as
+       per-service spawn time fields; match whatever yours uses.
+       ============================================================ -->
+  <PoliceAutomobileSpawnSettings>
+    <TimeBetweenSpawnAttempts_Min value="2.0"/>   <!-- vanilla ~6  -->
+    <TimeBetweenSpawnAttempts_Max value="5.0"/>   <!-- vanilla ~10 -->
+  </PoliceAutomobileSpawnSettings>
+
+  <!-- ============================================================
+       4) EVASION / PAROLE — how long until you lose them.
+       HIGHER = they commit, hunt longer, don't give up. Tune the
+       per-wanted-level hidden-evasion times in your file's
+       <ParoleDuration*> / WantedLevel threshold section.
+       Suggested multiplier: ~1.5–2x vanilla evasion times.
+       ============================================================ -->
+  <!-- Example shape — adapt to your file's actual tags:
+  <ParoleDurationOverrides>
+    <Item><WantedLevel>WANTED_LEVEL1</WantedLevel><Duration value="20000"/></Item>
+    <Item><WantedLevel>WANTED_LEVEL5</WantedLevel><Duration value="60000"/></Item>
+  </ParoleDurationOverrides>
+  -->
+
+</CDispatchData>

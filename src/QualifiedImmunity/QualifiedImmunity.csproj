@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Builds a ScriptHookVDotNet (SHVDNE) script DLL for GTA V.
+    Set the HintPath below to your SHVDNE install, then `dotnet build -c Release`.
+    Copy bin\Release\net48\QualifiedImmunity.dll into your game's scripts\ folder.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>QualifiedImmunity</AssemblyName>
+    <Platforms>x64</Platforms>
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Point these at the SHVDNE DLLs that ship with the runtime you installed. -->
+    <Reference Include="ScriptHookVDotNet3">
+      <HintPath>libs\ScriptHookVDotNet3.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- KeyDown/KeyEventArgs/Keys (the provoke + ride-along hotkeys) live in WinForms. -->
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+</Project>
