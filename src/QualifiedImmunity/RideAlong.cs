@@ -307,13 +307,19 @@ namespace QualifiedImmunity
                 return;
             }
 
-            // Spawn CLOSE to the player (inside the active physics-simulation bubble) so
-            // the cruiser is actually simulated and its AI driver can move it. A far,
-            // off-screen spawn leaves the vehicle's physics asleep -- wheels never turn,
-            // and no drive command (not even WANDER) gets it off 0.0 mph.
-            Vector3 roadPos = FindCloseSpawn(player.Position);
+            // Spawn the cruiser OUT OF SIGHT and at a distance so it visibly drives up to
+            // the player rather than popping into view. (The earlier "spawn close" hack was
+            // a workaround for the freeze bug, which is now actually fixed -- see the
+            // SET_POLICE_IGNORE_PLAYER per-frame fix -- so we can do this properly again.)
+            Vector3 roadPos = FindHiddenSpawn(player.Position, 75f, 130f);
+            if (roadPos.DistanceTo(player.Position) < 60f)
+            {
+                Vector3 fallback = SnapToRoad(player.Position + RandomOffset(85f));
+                roadPos = fallback != Vector3.Zero ? fallback : player.Position + RandomOffset(80f);
+            }
 
-            // Stream collision in at the spawn point as a belt-and-suspenders measure.
+            // Stream collision in at the (far, off-screen) spawn point so the cruiser has
+            // ground under it before it's tasked to drive.
             Function.Call(Hash.REQUEST_COLLISION_AT_COORD, roadPos.X, roadPos.Y, roadPos.Z);
 
             // Spawn slightly in the air so the chassis doesn't clip into the road mesh
@@ -322,20 +328,18 @@ namespace QualifiedImmunity
             if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); return; }
             Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _copCar);
             Function.Call(Hash.FREEZE_ENTITY_POSITION, _copCar, false); // ensure physics is active, not frozen
-            Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED, _copCar, 1); // unlocked so the player can climb in
-            
+
             _driver = _copCar.CreatePedOnSeat(VehicleSeat.Driver, new Model(PedHash.Cop01SMY));
             bool hasPartner = _rng.Next(2) == 0;                 // ~50% chance of a two-officer car
             if (hasPartner) _partner = _copCar.CreatePedOnSeat(VehicleSeat.Passenger, new Model(PedHash.Cop01SMY));
 
             _playerSeat = hasPartner ? 2 : 0;                    // rear-right if partnered, else front passenger
 
-            // Lock individual front doors to prevent player from carjacking driver/partner
-            Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 0, 2); // Front Left (Driver) Locked
-            if (hasPartner)
-            {
-                Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 1, 2); // Front Right (Passenger) Locked
-            }
+            // Keep the car enterable for the player at all times (they came for a RIDE) --
+            // only the driver door is reserved. The driver/partner can't be jacked regardless
+            // (LockIntoCar pins them in), so we DON'T lock the passenger door anymore: that
+            // was blocking the player from getting back in after stepping out mid-ride.
+            LockCarForRide();
 
             _copCar.IsEngineRunning = true;
             _copCar.IsSirenActive = true;
@@ -461,7 +465,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V4.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call a unit.");
+                Notify("~g~Qualified Immunity V4.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call a unit.");
             }
 
             PollController();
@@ -821,6 +825,17 @@ namespace QualifiedImmunity
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
         }
 
+        // Keep the cruiser open for the player (passenger + rear seats) while reserving the
+        // driver door for the AI. Police vehicles default to locked-for-player, so this is
+        // re-asserted whenever the player is out, otherwise they can't climb back in.
+        private void LockCarForRide()
+        {
+            if (!Valid(_copCar)) return;
+            Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED, _copCar, 1);               // whole car enterable
+            Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED_FOR_PLAYER, _copCar, Game.Player.Handle, false);
+            Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 0, 2); // ...except the driver door
+        }
+
         private void PromoteDriverIfNeeded()
         {
             if (Valid(_driver)) return;
@@ -844,7 +859,9 @@ namespace QualifiedImmunity
 
         private void ResetRideDelay()
         {
-            _ridePursuitDelay = 10.0 + _rng.NextDouble() * 30.0;
+            // Shorter wait before the next pursuit kicks off (was 10-40s) so the ride
+            // actually turns into the action the player came for, sooner.
+            _ridePursuitDelay = 8.0 + _rng.NextDouble() * 12.0;
         }
 
         private void AssignCop(Ped c)
@@ -866,9 +883,13 @@ namespace QualifiedImmunity
         {
             if (!Valid(p)) return;
             Function.Call(Hash.SET_DRIVER_ABILITY, p, 1.0f);
-            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, 0.5f);
+            // Lower aggression (was 0.5): high aggression is what makes the AI barge off
+            // the road and plow through obstacles. At full ability + low aggression they
+            // still drive fast, but thread the roads instead of ramming/cutting corners.
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, 0.3f);
             Function.Call(Hash.SET_PED_STEERS_AROUND_VEHICLES, p, true);
             Function.Call(Hash.SET_PED_STEERS_AROUND_OBJECTS, p, true);
+            Function.Call(Hash.SET_PED_STEERS_AROUND_PEDS, p, true);
             // NOTE: deliberately NOT setting PreferNavmeshInChase -- on Enhanced it can
             // push the AI off the road grid (driving over sidewalks/terrain) instead of
             // following roads, which wrecks normal driving. Let it use the road network.
@@ -888,7 +909,7 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_AS_COP, p, false);
 
             MakeGoodDriver(p);
-            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, 0.5f);
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, 0.3f); // calmer = stays on the road
             // Keep the driver in the car: with events unblocked it'll otherwise bail out
             // to react/fight, fighting our re-seat logic (the get-in/get-out loop).
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_CanUseVehicles, true);
@@ -898,6 +919,10 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_DisableSpinOutDuringVehicleChase, true);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_DisableCruiseInFrontDuringBlockDuringVehicleChase, true);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_DisablePullAlongsideDuringVehicleChase, true);
+            // Force the chase to follow the ROAD network instead of cutting across navmesh
+            // (sidewalks/terrain/props). Navmesh-in-chase is exactly what makes the cruiser
+            // plow into objects with no real pathing during a pursuit.
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_PreferNavmeshInChase, false);
             Function.Call(Hash.SET_PED_STAY_IN_VEHICLE_WHEN_JACKED, p, true);
         }
 
@@ -1024,42 +1049,6 @@ namespace QualifiedImmunity
                 return snappedRaw;
 
             return rawOffset;
-        }
-
-        // Find a road node CLOSE to the player -- inside the active physics-simulation
-        // bubble -- so a freshly spawned AI cruiser is actually simulated and can drive.
-        // A vehicle spawned far away and off-screen has its physics body asleep: collision
-        // streams in (HAS_COLLISION_LOADED returns true) but the wheels never turn, so NO
-        // drive command (not even WANDER) moves it. Prefers an off-camera node, but a
-        // visible one that actually DRIVES beats a hidden one frozen at 0.0 mph.
-        private Vector3 FindCloseSpawn(Vector3 around)
-        {
-            // Pass 1: off-camera road node, ~35-58m out -- far enough that the unit
-            // actually drives in (not an instant "arrival"), close enough to stay simulated.
-            for (int attempt = 0; attempt < 16; attempt++)
-            {
-                float dist = 35f + (float)_rng.NextDouble() * 23f;
-                Vector3 node = SnapToRoad(around + RandomOffset(dist));
-                if (node != Vector3.Zero
-                    && node.DistanceTo(around) >= 32f
-                    && node.DistanceTo(around) <= 62f
-                    && !Function.Call<bool>(Hash.IS_SPHERE_VISIBLE, node.X, node.Y, node.Z, 3.0f))
-                    return node;
-            }
-            // Pass 2: any road node 32-62m, visible is fine.
-            for (int attempt = 0; attempt < 16; attempt++)
-            {
-                float dist = 34f + (float)_rng.NextDouble() * 26f;
-                Vector3 node = SnapToRoad(around + RandomOffset(dist));
-                if (node != Vector3.Zero
-                    && node.DistanceTo(around) >= 32f
-                    && node.DistanceTo(around) <= 62f)
-                    return node;
-            }
-            // Last resort: nearest street point ~40m out.
-            Vector3 street = SnapToRoad(around + RandomOffset(40f));
-            if (street != Vector3.Zero) return street;
-            return around + RandomOffset(38f);
         }
 
         private void Cleanup()

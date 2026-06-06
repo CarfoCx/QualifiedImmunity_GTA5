@@ -19,8 +19,15 @@ namespace QualifiedImmunity
         private float _scanRadius = 160f;   // pin/recover bodies within this of the player
         private int _maxAmbulances = 3;     // concurrent meat wagons
         private int _maxBodies = 48;        // safety cap so we never blow the ped budget
+        // Natural EMS response time: a body sits a while before a wagon is even dispatched,
+        // then the ambulance drives in from a distance (it isn't spawned on top of the body).
+        private float _dispatchDelayMin = 12f;
+        private float _dispatchDelayMax = 35f;
 
-        private enum Stage { EnRoute, OnFoot, Leaving }
+        // EnRoute: driving in. OnFoot: attendant walking to the body. Tending: medic
+        // kneeling over the corpse. Carrying: attendant hauling the body to the wagon.
+        // Leaving: loaded up, driving off.
+        private enum Stage { EnRoute, OnFoot, Tending, Carrying, Leaving }
 
         private class Recovery
         {
@@ -35,6 +42,9 @@ namespace QualifiedImmunity
         // Pinned bodies, oldest first so the safety cap can release the oldest.
         private readonly List<int> _bodies = new List<int>();
         private readonly HashSet<int> _bodySet = new HashSet<int>();
+        // When each body becomes eligible for dispatch (pinned time + a random delay), so
+        // an ambulance doesn't pop in the instant someone dies.
+        private readonly Dictionary<int, DateTime> _eligibleAt = new Dictionary<int, DateTime>();
         // Bodies the safety cap handed back to the engine. Kept out of re-pinning so
         // a released corpse that's still near the player doesn't bounce right back in
         // (which would defeat the cap). Pruned once the ped is gone.
@@ -67,6 +77,7 @@ namespace QualifiedImmunity
             _bodies.Clear();
             _bodySet.Clear();
             _released.Clear();
+            _eligibleAt.Clear();
 
             foreach (Recovery r in _jobs)
             {
@@ -81,6 +92,8 @@ namespace QualifiedImmunity
             _enabled       = s.GetValue("Bodies", "KeepBodiesUntilAmbulance", _enabled);
             _maxAmbulances = s.GetValue("Bodies", "MaxAmbulances", _maxAmbulances);
             _maxBodies     = s.GetValue("Bodies", "MaxPersistentBodies", _maxBodies);
+            _dispatchDelayMin = s.GetValue("Bodies", "DispatchDelayMinSeconds", _dispatchDelayMin);
+            _dispatchDelayMax = s.GetValue("Bodies", "DispatchDelayMaxSeconds", _dispatchDelayMax);
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -120,6 +133,10 @@ namespace QualifiedImmunity
                 Function.Call(Hash.SET_ENTITY_LOAD_COLLISION_FLAG, p, true);
                 _bodies.Add(p.Handle);
                 _bodySet.Add(p.Handle);
+                // Stagger the EMS response: this body won't be dispatched to until a random
+                // delay has elapsed, so wagons arrive over natural time, not instantly.
+                _eligibleAt[p.Handle] = DateTime.Now.AddSeconds(
+                    _dispatchDelayMin + _rng.NextDouble() * Math.Max(0f, _dispatchDelayMax - _dispatchDelayMin));
 
                 // Add crime scene flare on 30% of bodies
                 if (_rng.NextDouble() < 0.3)
@@ -181,7 +198,9 @@ namespace QualifiedImmunity
             Ped body = (Ped)Entity.FromHandle(bodyHandle);
             if (body == null || !body.Exists()) return;
 
-            Vector3 road = SnapToRoad(body.Position + Offset(35f));
+            // Spawn well away (was ~35m) so the wagon visibly drives in rather than
+            // appearing next to the body. The drive-in is the "natural arrival time".
+            Vector3 road = SnapToRoad(body.Position + Offset(85f + (float)_rng.NextDouble() * 45f));
             Vector3 spawn = new Vector3(road.X, road.Y, road.Z + 2.5f);
             Vehicle van = World.CreateVehicle(new Model(VehicleHash.Ambulance), spawn);
             if (van == null) return;
@@ -224,8 +243,9 @@ namespace QualifiedImmunity
                     continue;
                 }
 
-                // Body already gone (deleted elsewhere) -> just send the crew off.
-                if (body == null || !body.Exists())
+                // Body gone before we've loaded it (deleted elsewhere) -> send the crew off.
+                // Once we're Leaving, the body is *meant* to be gone (loaded), so skip this.
+                if ((body == null || !body.Exists()) && r.Stage != Stage.Leaving)
                 {
                     DriveOffAndRelease(r);
                     _jobs.RemoveAt(i);
@@ -252,10 +272,48 @@ namespace QualifiedImmunity
                         Ped fetch = Valid(r.Attendant) ? r.Attendant : r.Driver;
                         if (!Valid(fetch)) { DriveOffAndRelease(r); _jobs.RemoveAt(i); break; }
 
-                        if (fetch.Position.DistanceTo(body.Position) < 2.5f || secs > 30)
+                        // Reached the corpse -> kneel and examine it (the medic "tending" beat).
+                        if (fetch.Position.DistanceTo(body.Position) < 2.0f || secs > 25)
                         {
-                            // Loaded up -- the body is taken away.
-                            RemoveBody(r.Body);
+                            Function.Call(Hash.TASK_TURN_PED_TO_FACE_ENTITY, fetch, body, 1500);
+                            Function.Call(Hash.TASK_START_SCENARIO_IN_PLACE, fetch,
+                                "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true);
+                            r.Stage = Stage.Tending;
+                            r.Since = DateTime.Now;
+                        }
+                        break;
+                    }
+
+                    case Stage.Tending:
+                    {
+                        Ped fetch = Valid(r.Attendant) ? r.Attendant : r.Driver;
+                        if (!Valid(fetch)) { RemoveBody(r.Body); DriveOffAndRelease(r); _jobs.RemoveAt(i); break; }
+
+                        // After a few seconds tending, hoist the body and carry it to the wagon.
+                        if (secs > 5.0)
+                        {
+                            Function.Call(Hash.CLEAR_PED_TASKS, fetch);
+                            CarryBody(fetch, body);                       // attach corpse to the medic
+                            Vector3 rear = VanRear(r.Van);
+                            Function.Call(Hash.TASK_FOLLOW_NAV_MESH_TO_COORD, fetch,
+                                rear.X, rear.Y, rear.Z, 1.2f, -1, 1.0f, false, 0f);
+                            r.Stage = Stage.Carrying;
+                            r.Since = DateTime.Now;
+                        }
+                        break;
+                    }
+
+                    case Stage.Carrying:
+                    {
+                        Ped fetch = Valid(r.Attendant) ? r.Attendant : r.Driver;
+                        if (!Valid(fetch)) { if (body != null && body.Exists()) Function.Call(Hash.DETACH_ENTITY, body, true, true); RemoveBody(r.Body); DriveOffAndRelease(r); _jobs.RemoveAt(i); break; }
+
+                        Vector3 rear = VanRear(r.Van);
+                        // At the back of the wagon (or gave up) -> load the body in and board.
+                        if (fetch.Position.DistanceTo(rear) < 2.2f || secs > 16)
+                        {
+                            if (body != null && body.Exists()) Function.Call(Hash.DETACH_ENTITY, body, true, true);
+                            RemoveBody(r.Body);                           // body goes into the back
                             GTA.UI.Notification.PostTicker("~b~EMS:~w~ Body recovered.", false);
                             if (Valid(r.Attendant) && !r.Attendant.IsInVehicle(r.Van))
                                 Function.Call(Hash.TASK_ENTER_VEHICLE, r.Attendant, r.Van, 20000, 0, 2.0f, 1, 0);
@@ -305,6 +363,7 @@ namespace QualifiedImmunity
         private void Forget(int handle, int idxHint)
         {
             _bodySet.Remove(handle);
+            _eligibleAt.Remove(handle);
             if (idxHint >= 0 && idxHint < _bodies.Count && _bodies[idxHint] == handle)
                 _bodies.RemoveAt(idxHint);
             else
@@ -318,6 +377,9 @@ namespace QualifiedImmunity
             foreach (int h in _bodies)
             {
                 if (IsServiced(h)) continue;
+                // Respect the EMS response delay -- not yet eligible -> leave it for now.
+                DateTime elig;
+                if (_eligibleAt.TryGetValue(h, out elig) && DateTime.Now < elig) continue;
                 Ped p = (Ped)Entity.FromHandle(h);
                 if (p == null || !p.Exists()) continue;
                 float d = p.Position.DistanceTo(player.Position);
@@ -341,6 +403,27 @@ namespace QualifiedImmunity
             foreach (Recovery r in _jobs)
                 if (r.Body == bodyHandle) return true;
             return false;
+        }
+
+        // Hold the corpse across the medic's arms so it visibly travels to the wagon
+        // instead of blinking out where it lay. Collision off so the body doesn't drag on
+        // the medic's movement; fixedRot pins the carried pose to the attach point.
+        private void CarryBody(Ped medic, Ped body)
+        {
+            if (medic == null || !medic.Exists() || body == null || !body.Exists()) return;
+            Function.Call(Hash.SET_ENTITY_COLLISION, body, false, false);
+            int bone = Function.Call<int>(Hash.GET_PED_BONE_INDEX, medic, 24818); // SKEL_Spine3 (chest)
+            Function.Call(Hash.ATTACH_ENTITY_TO_ENTITY, body, medic, bone,
+                0.0f, 0.42f, 0.0f,    // held out in front of the chest
+                0.0f, 90.0f, 0.0f,    // laid horizontally across the arms
+                false, false, false, true, 2, true);
+        }
+
+        // Just behind the ambulance, where the rear doors are -- the body is "loaded" here.
+        private Vector3 VanRear(Vehicle van)
+        {
+            if (van == null || !van.Exists()) return Vector3.Zero;
+            return van.Position - van.ForwardVector * 3.2f;
         }
 
         private void MakeCarefulDriver(Ped p)

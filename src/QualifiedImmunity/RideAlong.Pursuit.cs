@@ -67,24 +67,29 @@ namespace QualifiedImmunity
             _backupCount = 0;
             _pitting = false; _lastPit = DateTime.MinValue; _lastCollateral = DateTime.MinValue;
             _swatCalled = false; _heliCalled = false; _swatWaves = 0; _lastSwat = DateTime.Now;
-            _lastRadio = DateTime.MinValue;   // first line fires immediately
+            // Don't dump the whole dispatch script the instant the siren flips on. The
+            // single SuspectThreatLine() above is the only start-of-pursuit announcement;
+            // radio chatter waits the normal gap so it isn't a wall of text at once.
+            _lastRadio = DateTime.Now;
             _lastBackup = DateTime.Now;       // first backup after the interval
             _lastReissue = DateTime.Now;
             _lastCarMoving = DateTime.Now;    // give the fresh chase task time to spool up
             _escapeTimerStarted = DateTime.MinValue; // reset escape timer
             _lastPursuitStart = DateTime.Now; // track UI timer
 
-            Notify("~r~Dispatch:~w~ Suspect fleeing! ALL UNITS - PURSUIT!");
-            CopBark(_driver, "GENERIC_WAR_CRY");
+            CopBark(_driver, "GENERIC_WAR_CRY"); // a single voiced bark, no extra ticker line
             SetPhase(Phase.Pursuit);
             return true;
         }
 
         // An existing nearby vehicle with an NPC driver, to designate as the suspect.
+        // Widened search (was 70m) so a pursuit reliably finds a target even when traffic
+        // is sparse -- the #1 reason "no pursuits ever happen". Min distance dropped so a
+        // car just ahead still qualifies.
         private Vehicle FindPursuitTarget()
         {
             if (!Valid(_copCar)) return null;
-            return NPCVehicleFinder.FindNearbyNPCDrivenVehicle(_copCar.Position, 70f, 18f, _copCar, null);
+            return NPCVehicleFinder.FindNearbyNPCDrivenVehicle(_copCar.Position, 130f, 10f, _copCar, null);
         }
 
         // Flag an existing vehicle's occupants as suspects: hostile to police, geared
@@ -268,6 +273,10 @@ namespace QualifiedImmunity
         private void ForceOutAndFight(Ped c)
         {
             if (!Valid(c)) return;
+            // Lift the event-block from the driving phase FIRST. While it's on, a ped that
+            // bails out just stands there frozen for a beat instead of reacting/advancing --
+            // that's the "glitch, don't move for a couple seconds" on exit. Off = they move.
+            Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, false);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanUseVehicles, false);   // CanUseVehicles=false -> get OUT now
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, true);    // CanLeaveVehicle
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_AlwaysFight, true);    // always fight

@@ -169,8 +169,9 @@ namespace QualifiedImmunity
         {
             DespawnPursuitProps();
 
-            // Re-board the OFFICERS once on entry, then refresh only every ~5s (no per-tick reset).
-            bool refresh = SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 5.0;
+            // Re-board the OFFICERS once on entry, then refresh only every ~9s -- long
+            // enough that a re-issue doesn't interrupt an in-progress walk-in animation.
+            bool refresh = SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 9.0;
             if (refresh)
             {
                 _lastReboardPrompt = DateTime.Now;
@@ -180,16 +181,26 @@ namespace QualifiedImmunity
                     Notify("~b~Dispatch:~w~ Hop back in for another run - or walk away to call it.");
             }
 
-            // Fallback: warp a stuck officer back in so the unit is never stranded.
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 12)
+            // Fallback: warp a genuinely stuck officer back in so the unit is never
+            // stranded -- but only after giving the walk-in animation real time to play
+            // (was 12s/14s, which often cut the animation off and looked like a teleport).
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 22)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 14)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 24)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.
             if (!player.IsInVehicle(_copCar))
             {
-                if (_copCar.Position.DistanceTo(player.Position) > 35f || SecondsInPhase > 30)
+                // Keep the doors enterable (police cars re-lock for the player) so stepping
+                // out mid-ride never traps you outside a "locked" cruiser.
+                LockCarForRide();
+                // Hold the car so it waits for you instead of driving off and stranding you.
+                if (Valid(_driver) && _driver.IsInVehicle(_copCar) && _copCar.Speed > 1f)
+                    Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
+                // End only if you actually walk away (more time/room than before so a
+                // fumble at the door doesn't cancel the ride).
+                if (_copCar.Position.DistanceTo(player.Position) > 45f || SecondsInPhase > 60)
                 { Notify("~y~Ride-along ended."); Cleanup(); }
                 return;
             }
@@ -206,7 +217,14 @@ namespace QualifiedImmunity
         private void ReboardCop(Ped c, int seat)
         {
             if (!Valid(c) || c.IsInVehicle(_copCar)) return;
+            // CRITICAL: ForceOutAndFight set CanUseVehicles=false to bail them out for the
+            // gunfight. While that's false, TASK_ENTER_VEHICLE can't run -- the cop just
+            // stands there until the warp fallback teleports them in (no animation). Re-
+            // enable vehicle use so they actually walk up and climb in with the animation.
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanUseVehicles, true);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, false);
             Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, true); // don't bail out to react
+            // flag 1 = walk to the door and play the proper entry animation (not a warp).
             Function.Call(Hash.TASK_ENTER_VEHICLE, c, _copCar, 20000, seat, 2.0f, 1, 0);
         }
 
