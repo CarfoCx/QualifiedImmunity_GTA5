@@ -36,6 +36,26 @@ namespace QualifiedImmunity
         private float _escapeDistance = 160.0f;
         private float _escapeTimeLimit = 25.0f;
 
+        // Pacing the player can tune in the .ini without a rebuild.
+        private float _pursuitDelayMin = 25.0f;   // gap before the next pursuit kicks off
+        private float _pursuitDelayMax = 55.0f;
+        private float _radioIntervalMin = 30.0f;  // gap between unhinged radio lines
+        private float _radioIntervalMax = 55.0f;
+        private bool _showDebugHud = false;        // the cyan QI diagnostic overlay (dev only)
+        private float _driverAggressiveness = 0.3f; // 0=calm/road-following, 1=reckless
+        private float _spawnDistanceMin = 75.0f;   // how far off the unit spawns to drive in
+        private float _spawnDistanceMax = 130.0f;
+        private int _maxReplacementUnits = 2;      // replacement units dispatched if yours is lost
+
+        // Unit-downed recovery state.
+        private int _replacementsUsed;
+
+        // Phone dispatch menu state (call dispatch on the cell phone instead of a raw key).
+        private bool _phoneOpen;
+        private int _phoneIndex;
+        private DateTime _phoneOpenedAt = DateTime.MinValue;
+        private const double PhoneRingSeconds = 1.8;
+
         // Configured baselines for the three values the player can nudge live via
         // the D-pad (follow distance, engage distance/speed). The live fields above
         // get mutated mid-pursuit, so we snapshot the .ini values and restore them
@@ -49,6 +69,7 @@ namespace QualifiedImmunity
         private DateTime _phaseSince = DateTime.MinValue;
 
         private Vehicle _copCar;
+        private Blip _copBlip;    // map/radar marker so the player can see their unit
         private Ped _driver;
         private Ped _partner;     // null if it's a solo officer
         private Vehicle _suspectCar;
@@ -98,7 +119,6 @@ namespace QualifiedImmunity
         private DateTime _lastCollateral = DateTime.MinValue;
         private DateTime _lastProgress = DateTime.MinValue;   // en-route stuck/fail detection
         private float _lastEnRouteDist = float.MaxValue;       // track closing distance, not just speed
-        private bool _enRouteWarped;                           // one-time "place it next to me" fallback
         private bool _copGrounded;                             // cruiser confirmed sitting on loaded collision
         private int _driveMethod;                              // en-route drive native: 0=longrange,1=mission GoTo,2=wander
         private bool _everMoved;                               // cruiser has registered real motion this en-route
@@ -241,9 +261,18 @@ namespace QualifiedImmunity
 
             // RideAlong options
             _enableTourniquet = s.GetValue("RideAlong", "EnableTourniquet", _enableTourniquet);
+            _showDebugHud     = s.GetValue("RideAlong", "ShowDebugHud", _showDebugHud);
+            _driverAggressiveness = s.GetValue("RideAlong", "DriverAggressiveness", _driverAggressiveness);
+            _spawnDistanceMin = s.GetValue("RideAlong", "SpawnDistanceMin", _spawnDistanceMin);
+            _spawnDistanceMax = s.GetValue("RideAlong", "SpawnDistanceMax", _spawnDistanceMax);
+            _maxReplacementUnits = s.GetValue("RideAlong", "MaxReplacementUnits", _maxReplacementUnits);
 
             // Pursuit options
             _innocentChance       = s.GetValue("Pursuit", "InnocentChance", _innocentChance);
+            _pursuitDelayMin      = s.GetValue("Pursuit", "PursuitDelayMinSeconds", _pursuitDelayMin);
+            _pursuitDelayMax      = s.GetValue("Pursuit", "PursuitDelayMaxSeconds", _pursuitDelayMax);
+            _radioIntervalMin     = s.GetValue("Pursuit", "RadioIntervalMinSeconds", _radioIntervalMin);
+            _radioIntervalMax     = s.GetValue("Pursuit", "RadioIntervalMaxSeconds", _radioIntervalMax);
             _threat1Chance        = s.GetValue("Pursuit", "Threat1Chance", _threat1Chance);
             _threat2Chance        = s.GetValue("Pursuit", "Threat2Chance", _threat2Chance);
             _swatDelaySeconds     = s.GetValue("Pursuit", "SwatDelaySeconds", _swatDelaySeconds);
@@ -271,9 +300,8 @@ namespace QualifiedImmunity
         {
             if (e.KeyCode == _requestKey)
             {
-                // Always acknowledge the request key so it's obvious F9 is registering.
-                if (_phase == Phase.Idle) RequestRideAlong();
-                else Notify("~y~Ride-along already active (" + _phase + "). Press " + _cancelKey + " to cancel.");
+                // The request key now raises the cell phone to dispatch (toggles the menu).
+                if (_phoneOpen) ClosePhone(); else OpenPhone();
                 return;
             }
             if (e.KeyCode == _cancelKey && _phase != Phase.Idle) { Notify("~y~Ride-along ended."); Cleanup(); }
@@ -285,8 +313,7 @@ namespace QualifiedImmunity
             Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)GTA.Control.Jump, true);
             if (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, (int)GTA.Control.Jump))
             {
-                if (_phase == Phase.Idle) RequestRideAlong();
-                else { Notify("~y~Ride-along ended."); Cleanup(); }
+                if (_phoneOpen) ClosePhone(); else OpenPhone();
             }
         }
 
@@ -298,6 +325,100 @@ namespace QualifiedImmunity
         private bool CarStalled() { return (DateTime.Now - _lastCarMoving).TotalSeconds > 3.5; }
 
         // -------------------------------------------------------------------
+        // Cell-phone dispatch menu -- "call" the ride-along instead of a raw key.
+        // -------------------------------------------------------------------
+        private void OpenPhone()
+        {
+            Ped player = Game.Player.Character;
+            if (player == null || !player.Exists() || player.IsDead) return;
+            _phoneOpen = true;
+            _phoneIndex = 0;
+            _phoneOpenedAt = DateTime.Now;
+            // Put the phone to the player's ear and play a dial/ring so it reads as a call.
+            Function.Call(Hash.TASK_USE_MOBILE_PHONE_TIMED, player, 30000);
+            Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, "Dial_and_Remote_Ring", "Phone_SoundSet_Default", true);
+        }
+
+        private void ClosePhone()
+        {
+            _phoneOpen = false;
+            Ped player = Game.Player.Character;
+            if (player != null && player.Exists() && !player.IsInVehicle())
+                Function.Call(Hash.CLEAR_PED_TASKS, player); // put the phone away
+        }
+
+        private void PhoneTick()
+        {
+            if (!_phoneOpen) return;
+            Ped player = Game.Player.Character;
+            if (player == null || !player.Exists() || player.IsDead) { ClosePhone(); return; }
+
+            // Don't let the vanilla phone open over our menu while it's up.
+            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)GTA.Control.Phone, true);
+
+            // Brief "ringing" beat before the menu connects.
+            double since = (DateTime.Now - _phoneOpenedAt).TotalSeconds;
+            if (since < PhoneRingSeconds)
+            {
+                DrawPhoneBox("DISPATCH", new string[] { "...ringing..." }, -1);
+                return;
+            }
+
+            // Context-sensitive options: request when idle, cancel when a ride is active.
+            bool active = _phase != Phase.Idle;
+            string[] opts = active
+                ? new string[] { "Cancel Ride-Along", "Close" }
+                : new string[] { "Request Ride-Along Unit", "Close" };
+
+            if (Game.IsControlJustPressed(GTA.Control.PhoneUp))
+                _phoneIndex = (_phoneIndex - 1 + opts.Length) % opts.Length;
+            if (Game.IsControlJustPressed(GTA.Control.PhoneDown))
+                _phoneIndex = (_phoneIndex + 1) % opts.Length;
+            if (Game.IsControlJustPressed(GTA.Control.PhoneCancel)) { PhoneBeep(false); ClosePhone(); return; }
+            if (Game.IsControlJustPressed(GTA.Control.PhoneSelect))
+            {
+                PhoneBeep(true);
+                bool chosePrimary = (_phoneIndex == 0);
+                ClosePhone();
+                if (chosePrimary)
+                {
+                    if (active) { Notify("~y~Ride-along ended."); Cleanup(); }
+                    else RequestRideAlong();
+                }
+                return;
+            }
+
+            DrawPhoneBox("POLICE DISPATCH", opts, _phoneIndex);
+        }
+
+        private static void PhoneBeep(bool accept)
+        {
+            Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, accept ? "SELECT" : "BACK",
+                "HUD_FRONTEND_DEFAULT_SOUNDSET", true);
+        }
+
+        private void DrawPhoneBox(string title, string[] options, int sel)
+        {
+            // Dark backdrop sized to the option count (0-1 screen space).
+            float h = 0.045f + 0.032f * options.Length;
+            Function.Call(Hash.DRAW_RECT, 0.165f, 0.40f + h / 2f, 0.235f, h, 0, 0, 0, 190);
+
+            float px = 38f, py = 268f, lineH = 26f;
+            new GTA.UI.TextElement("~b~" + title, new System.Drawing.PointF(px, py), 0.45f,
+                System.Drawing.Color.White).Draw();
+            for (int i = 0; i < options.Length; i++)
+            {
+                bool s = (i == sel);
+                System.Drawing.Color col = s ? System.Drawing.Color.Yellow : System.Drawing.Color.White;
+                new GTA.UI.TextElement((s ? "> " : "   ") + options[i],
+                    new System.Drawing.PointF(px, py + lineH * (i + 1)), 0.4f, col).Draw();
+            }
+            new GTA.UI.TextElement("[Arrows] Navigate  [Enter] Select  [Esc] Hang up",
+                new System.Drawing.PointF(px, py + lineH * (options.Length + 1)), 0.3f,
+                System.Drawing.Color.LightGray).Draw();
+        }
+
+        // -------------------------------------------------------------------
         private void RequestRideAlong()
         {
             Ped player = Game.Player.Character;
@@ -306,16 +427,57 @@ namespace QualifiedImmunity
                 Notify("~r~Dispatch:~w~ Step out into the open and call again.");
                 return;
             }
+            _replacementsUsed = 0;       // fresh ride -> reset the replacement budget
+            SpawnUnit(player, false);
+        }
 
-            // Spawn the cruiser OUT OF SIGHT and at a distance so it visibly drives up to
-            // the player rather than popping into view. (The earlier "spawn close" hack was
-            // a workaround for the freeze bug, which is now actually fixed -- see the
-            // SET_POLICE_IGNORE_PLAYER per-frame fix -- so we can do this properly again.)
-            Vector3 roadPos = FindHiddenSpawn(player.Position, 75f, 130f);
-            if (roadPos.DistanceTo(player.Position) < 60f)
+        // Your unit got wrecked or all its officers went down -> dispatch a fresh unit and
+        // keep the ride going, instead of just ending it. Capped by MaxReplacementUnits.
+        private void DispatchReplacementOrEnd(string reason)
+        {
+            Ped player = Game.Player.Character;
+            if (player == null || !player.Exists()) { Cleanup(); return; }
+            if (_replacementsUsed >= _maxReplacementUnits)
             {
-                Vector3 fallback = SnapToRoad(player.Position + RandomOffset(85f));
-                roadPos = fallback != Vector3.Zero ? fallback : player.Position + RandomOffset(80f);
+                Notify(reason + " No units left in the area. Ride-along over.");
+                Cleanup();
+                return;
+            }
+            _replacementsUsed++;
+            Notify(reason + " ~b~Dispatching a replacement unit...");
+            ReleaseCurrentUnit();        // let the old wreck/bodies go back to the engine
+            DespawnPursuitProps();       // drop any suspect/backup tied to the lost unit
+            _engaged = false; _pitting = false;
+            _threat = null; _assistEngaged = false;
+            SpawnUnit(player, true);
+        }
+
+        // Release the current unit's entities (wreck, downed officers, blip) without ending
+        // the ride, so a replacement can take over. (Cleanup() would end the whole ride.)
+        private void ReleaseCurrentUnit()
+        {
+            if (_copBlip != null && _copBlip.Exists()) _copBlip.Delete();
+            _copBlip = null;
+            if (_driver != null && _driver.Exists())
+            { RideAlongRegistry.FriendlyCops.Remove(_driver.Handle); CopNames.Forget(_driver.Handle); _driver.MarkAsNoLongerNeeded(); }
+            if (_partner != null && _partner.Exists())
+            { RideAlongRegistry.FriendlyCops.Remove(_partner.Handle); CopNames.Forget(_partner.Handle); _partner.MarkAsNoLongerNeeded(); }
+            if (_copCar != null && _copCar.Exists()) _copCar.MarkAsNoLongerNeeded();
+            _driver = null; _partner = null; _copCar = null;
+        }
+
+        // Spawn a ride-along unit OUT OF SIGHT at a distance and send it en route to the
+        // player. Shared by the initial F9 request and the unit-downed replacement dispatch.
+        private void SpawnUnit(Ped player, bool isReplacement)
+        {
+            // Spawn the cruiser OUT OF SIGHT and at a (tunable) distance so it visibly drives
+            // up to the player rather than popping into view.
+            Vector3 roadPos = FindHiddenSpawn(player.Position, _spawnDistanceMin, _spawnDistanceMax);
+            float minAccept = Math.Max(20f, _spawnDistanceMin * 0.8f);
+            if (roadPos.DistanceTo(player.Position) < minAccept)
+            {
+                Vector3 fallback = SnapToRoad(player.Position + RandomOffset(_spawnDistanceMin + 10f));
+                roadPos = fallback != Vector3.Zero ? fallback : player.Position + RandomOffset(_spawnDistanceMin);
             }
 
             // Stream collision in at the (far, off-screen) spawn point so the cruiser has
@@ -325,7 +487,7 @@ namespace QualifiedImmunity
             // Spawn slightly in the air so the chassis doesn't clip into the road mesh
             Vector3 spawnPos = new Vector3(roadPos.X, roadPos.Y, roadPos.Z + 2.5f);
             _copCar = World.CreateVehicle(new Model(VehicleHash.Police3), spawnPos);
-            if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); return; }
+            if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); Cleanup(); return; }
             Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _copCar);
             Function.Call(Hash.FREEZE_ENTITY_POSITION, _copCar, false); // ensure physics is active, not frozen
 
@@ -340,6 +502,16 @@ namespace QualifiedImmunity
             // (LockIntoCar pins them in), so we DON'T lock the passenger door anymore: that
             // was blocking the player from getting back in after stepping out mid-ride.
             LockCarForRide();
+
+            // Blip the cruiser so the player can watch it drive in and find it later.
+            _copBlip = _copCar.AddBlip();
+            if (_copBlip != null && _copBlip.Exists())
+            {
+                Function.Call(Hash.SET_BLIP_SPRITE, _copBlip, 56);   // police-car icon
+                _copBlip.Color = BlipColor.Blue;
+                _copBlip.Name = "Ride-Along Unit";
+                Function.Call(Hash.SET_BLIP_AS_SHORT_RANGE, _copBlip, false);
+            }
 
             _copCar.IsEngineRunning = true;
             _copCar.IsSirenActive = true;
@@ -388,10 +560,10 @@ namespace QualifiedImmunity
             Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, Game.Player);
             Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, Game.Player, true);
 
-            Notify("~b~Dispatch:~w~ Unit en route for your ride-along. Stand by.");
+            Notify(isReplacement ? "~b~Dispatch:~w~ Replacement unit en route. Stand by."
+                                 : "~b~Dispatch:~w~ Unit en route for your ride-along. Stand by.");
             _lastProgress = DateTime.Now;
             _lastReissue = DateTime.MinValue;
-            _enRouteWarped = false;
             _copGrounded = false;
             _driveMethod = 0;
             _everMoved = false;
@@ -465,17 +637,19 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V4.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call a unit.");
+                Notify("~g~Qualified Immunity V5.3:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
             CheckCommands();
+            PhoneTick();   // the cell-phone dispatch menu (works whether or not a ride is active)
             if (_phase == Phase.Idle) return;
 
-            // Wrecked or dead driver ends the ride
-            if (!IsDriveable(_copCar)) { Notify("~r~Dispatch:~w~ Unit's wrecked. Ride-along over."); Cleanup(); return; }
+            // Unit lost (wrecked cruiser, or all officers down) -> dispatch a replacement
+            // and keep the ride going, until the replacement budget runs out.
+            if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's wrecked."); return; }
             PromoteDriverIfNeeded();
-            if (!Valid(_driver)) { Notify("~r~Dispatch:~w~ Officers are down. Ride-along over."); Cleanup(); return; }
+            if (!Valid(_driver)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Officers are down."); return; }
 
             Ped player = Game.Player.Character;
 
@@ -859,9 +1033,10 @@ namespace QualifiedImmunity
 
         private void ResetRideDelay()
         {
-            // Shorter wait before the next pursuit kicks off (was 10-40s) so the ride
-            // actually turns into the action the player came for, sooner.
-            _ridePursuitDelay = 8.0 + _rng.NextDouble() * 12.0;
+            // Gap before the next pursuit (tunable in the .ini). Defaults 25-55s so
+            // pursuits feel like events, not a constant back-to-back stream.
+            float span = Math.Max(0f, _pursuitDelayMax - _pursuitDelayMin);
+            _ridePursuitDelay = _pursuitDelayMin + _rng.NextDouble() * span;
         }
 
         private void AssignCop(Ped c)
@@ -883,10 +1058,10 @@ namespace QualifiedImmunity
         {
             if (!Valid(p)) return;
             Function.Call(Hash.SET_DRIVER_ABILITY, p, 1.0f);
-            // Lower aggression (was 0.5): high aggression is what makes the AI barge off
-            // the road and plow through obstacles. At full ability + low aggression they
-            // still drive fast, but thread the roads instead of ramming/cutting corners.
-            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, 0.3f);
+            // Lower aggression (tunable; default 0.3): high aggression is what makes the AI
+            // barge off the road and plow through obstacles. At full ability + low aggression
+            // they still drive fast, but thread the roads instead of ramming/cutting corners.
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, _driverAggressiveness);
             Function.Call(Hash.SET_PED_STEERS_AROUND_VEHICLES, p, true);
             Function.Call(Hash.SET_PED_STEERS_AROUND_OBJECTS, p, true);
             Function.Call(Hash.SET_PED_STEERS_AROUND_PEDS, p, true);
@@ -909,7 +1084,7 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_AS_COP, p, false);
 
             MakeGoodDriver(p);
-            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, 0.3f); // calmer = stays on the road
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, _driverAggressiveness); // calmer = stays on the road
             // Keep the driver in the car: with events unblocked it'll otherwise bail out
             // to react/fight, fighting our re-seat logic (the get-in/get-out loop).
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_CanUseVehicles, true);
@@ -1074,6 +1249,8 @@ namespace QualifiedImmunity
             if (Valid(_suspectCar2)) _suspectCar2.MarkAsNoLongerNeeded();
             ReleaseHeli();
             StopNewsCam();
+            if (_copBlip != null && _copBlip.Exists()) _copBlip.Delete();
+            _copBlip = null;
             if (Valid(_driver)) { CopNames.Forget(_driver.Handle); _driver.MarkAsNoLongerNeeded(); }
             if (Valid(_partner)) { CopNames.Forget(_partner.Handle); _partner.MarkAsNoLongerNeeded(); }
             if (Valid(_copCar)) _copCar.MarkAsNoLongerNeeded();
@@ -1274,7 +1451,7 @@ namespace QualifiedImmunity
         // and whether the engine is on. Top-left, cyan.
         private void DrawDebug()
         {
-            if (_phase == Phase.Idle) return;
+            if (_phase == Phase.Idle || !_showDebugHud) return;
             bool carOk = _copCar != null && _copCar.Exists();
             // Is _driver actually the one in the DRIVER seat (-1)? "seat" alone wasn't
             // proving that; show the real occupant so we can tell if the AI even has a

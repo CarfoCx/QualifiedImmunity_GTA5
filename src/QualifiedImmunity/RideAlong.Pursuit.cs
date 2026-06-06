@@ -69,8 +69,9 @@ namespace QualifiedImmunity
             _swatCalled = false; _heliCalled = false; _swatWaves = 0; _lastSwat = DateTime.Now;
             // Don't dump the whole dispatch script the instant the siren flips on. The
             // single SuspectThreatLine() above is the only start-of-pursuit announcement;
-            // radio chatter waits the normal gap so it isn't a wall of text at once.
+            // the first radio quip waits the full interval so it isn't a wall of text.
             _lastRadio = DateTime.Now;
+            _radioDelay = _radioIntervalMin + _rng.NextDouble() * Math.Max(0f, _radioIntervalMax - _radioIntervalMin);
             _lastBackup = DateTime.Now;       // first backup after the interval
             _lastReissue = DateTime.Now;
             _lastCarMoving = DateTime.Now;    // give the fresh chase task time to spool up
@@ -129,11 +130,12 @@ namespace QualifiedImmunity
 
         private void PursuitTick()
         {
-            // Unhinged radio chatter -- spaced out so it isn't a chatterbox.
+            // Unhinged radio chatter -- sparse so it's an occasional punchline, not a
+            // constant stream. Interval is tunable in the .ini (defaults 30-55s).
             if ((DateTime.Now - _lastRadio).TotalSeconds > _radioDelay)
             {
                 _lastRadio = DateTime.Now;
-                _radioDelay = 12.0 + _rng.NextDouble() * 8.0;   // 12-20s between lines
+                _radioDelay = _radioIntervalMin + _rng.NextDouble() * Math.Max(0f, _radioIntervalMax - _radioIntervalMin);
                 RadioChatter();
             }
             // Backup waves (capped so it doesn't snowball forever).
