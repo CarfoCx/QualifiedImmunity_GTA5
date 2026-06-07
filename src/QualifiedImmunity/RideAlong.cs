@@ -578,6 +578,7 @@ namespace QualifiedImmunity
             if (Valid(_driver)) Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _driver, true, true);
             if (Valid(_partner)) Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _partner, true, true);
 
+            EnsureRelationships();   // wire cop/suspect/native-PD relations from the ride's start
             BefriendRidealongCops();
             LockIntoCar(_driver);
             if (Valid(_partner)) LockIntoCar(_partner);
@@ -676,10 +677,10 @@ namespace QualifiedImmunity
                 Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 16.0f, DRIVE_STYLE);
             else if (_driveMethod == 1)
                 Function.Call(Hash.TASK_VEHICLE_MISSION_PED_TARGET, _driver, _copCar, player,
-                    4, 16.0f, DRIVE_STYLE, 4.0f, 5.0f, false); // 4 == MISSION_GOTO
+                    4, 16.0f, DRIVE_STYLE, 2.0f, 5.0f, false); // 4 == MISSION_GOTO; small stop range -> pulls right up
             else
                 Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
-                    player.Position.X, player.Position.Y, player.Position.Z, 16.0f, DRIVE_STYLE, 4.0f);
+                    player.Position.X, player.Position.Y, player.Position.Z, 16.0f, DRIVE_STYLE, 2.0f); // 2m stop range
         }
 
         private bool _announcedLoad;
@@ -690,7 +691,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.1:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.2:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -802,16 +803,26 @@ namespace QualifiedImmunity
                         // (it never gets off 0.0). Leave the task alone so it can actually run.
                         bool isFirstIssue = (_lastReissue == DateTime.MinValue);
                         double sinceReissue = (DateTime.Now - _lastReissue).TotalSeconds;
-                        // Keep refreshing the destination until it's nearly on top of the player
-                        // (was 18m) so it actually pulls all the way up rather than stopping short.
-                        if (dist >= 10f && (isFirstIssue || sinceReissue > 10.0))
+                        // Keep refreshing the destination until it's right on top of the player,
+                        // and refresh FASTER once it's close so it noses all the way up instead
+                        // of coasting to a stop a few meters short and making you walk.
+                        double reissueGap = dist < 35f ? 3.5 : 10.0;
+                        if (dist >= 6f && (isFirstIssue || sinceReissue > reissueGap))
                         {
                             _lastReissue = DateTime.Now;
                             IssueEnRouteDrive(player, isFirstIssue);
                         }
 
-                        // Arrive CLOSE (was 20m): the unit pulls right up next to the player.
-                        if (dist < 8f || (_copCar.Speed < 1f && dist < 25f && (DateTime.Now - _lastProgress).TotalSeconds > 5))
+                        // Arrival, in priority order:
+                        //  - pulledUp : it got right next to you (the normal, desired case).
+                        //  - stuckClose: stopped within 16m and can't improve for 9s -- accept it.
+                        //  - bestEffort: genuinely can't path any closer (you're off the road
+                        //    network), so after 12s stalled it stops as close as it can and you
+                        //    cover the last few steps -- rather than failing the whole call.
+                        bool pulledUp   = dist < 8f;
+                        bool stuckClose = _copCar.Speed < 1f && dist < 16f && (DateTime.Now - _lastProgress).TotalSeconds > 9;
+                        bool bestEffort = _copCar.Speed < 1f && dist < 45f && (DateTime.Now - _lastProgress).TotalSeconds > 12;
+                        if (pulledUp || stuckClose || bestEffort)
                         {
                             // Release the KEEP_TASK lock from the en-route drive so the
                             // upcoming boarding/patrol tasks apply cleanly (the car is now
@@ -823,7 +834,9 @@ namespace QualifiedImmunity
 
                             Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
                             _copCar.IsSirenActive = false;
-                            Notify("~g~Dispatch:~w~ Your ride-along has ARRIVED - walk up and get in (" + SeatName(_playerSeat) + ").");
+                            Notify(pulledUp || stuckClose
+                                ? "~g~Dispatch:~w~ Your ride-along has ARRIVED - get in (" + SeatName(_playerSeat) + ")."
+                                : "~g~Dispatch:~w~ Unit's as close as it can get - walk over and get in (" + SeatName(_playerSeat) + ").");
                             _lastReboardPrompt = DateTime.MinValue;
                             _boardTaskIssued = false;
                             SetPhase(Phase.Boarding);
@@ -1073,11 +1086,13 @@ namespace QualifiedImmunity
             if (!Valid(_copCar)) return;
             Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED, _copCar, 1);               // whole car enterable
             Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED_FOR_PLAYER, _copCar, Game.Player.Handle, false);
-            // Driver door: lock state 3 = LOCKOUT_PLAYER_ONLY. State 2 (used before) locked
-            // the door for EVERYONE -- so when a cop bailed out to fight on foot he could
-            // never reopen it to re-board (he'd walk to the door and just stand there). State
-            // 3 keeps the player out of the driver seat while letting the AI driver back in.
-            Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 0, 3); // reserve the driver door for the AI
+            // Explicitly UNLOCK the driver door. We used to lock it to "reserve" the driver
+            // seat (state 2, then 3), but locking it -- even lockout-player-only -- stopped the
+            // AI driver from re-entering after he bailed out to fight: he'd walk to the door,
+            // fail to open it, walk off, and retry forever (the get-in/get-out loop). The
+            // driver can't be jacked (LockIntoCar pins him), so an open door is safe; on the
+            // rare frame the player grabs an empty driver seat they can just hop out again.
+            Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 0, 1); // driver door UNLOCKED
         }
 
         private void PromoteDriverIfNeeded()
@@ -1404,6 +1419,25 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, _suspGroup, _copsGroup);
             Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, _copsGroup, _playerGroup);
             Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, _playerGroup, _copsGroup);
+
+            // --- Co-operate with the game's own police (issue 4) ---
+            // Wire the NATIVE cop/SWAT relationship groups in too, so local PD actually
+            // works WITH the ride-along instead of ignoring it:
+            //   - native cops HATE our designated suspects -> they join the pursuit and
+            //     open fire on the same target on sight, rather than standing around.
+            //   - native cops RESPECT our unit -> no friendly fire between the ride-along
+            //     officers and local PD; they fight side by side.
+            // (Empty groups after a ride are harmless; these are global, set once.)
+            int copHash  = Function.Call<int>(Hash.GET_HASH_KEY, "COP");
+            int swatHash = Function.Call<int>(Hash.GET_HASH_KEY, "SWAT");
+            int[] lawGroups = { copHash, swatHash };
+            foreach (int g in lawGroups)
+            {
+                Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, g, _suspGroup);
+                Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, _suspGroup, g);
+                Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, g, _copsGroup);
+                Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, _copsGroup, g);
+            }
             _relsReady = true;
         }
 

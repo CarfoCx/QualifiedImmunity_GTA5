@@ -24,7 +24,11 @@ namespace QualifiedImmunity
         private float _spawnIntervalMax = 170f;
         private float _spawnDistMin = 60f;
         private float _spawnDistMax = 130f;
+        private float _startupGraceSeconds = 60f;  // stage NOTHING for this long after load
         private const float DespawnDist = 300f;   // events past this from the player are torn down
+
+        private readonly DateTime _scriptStart = DateTime.Now; // when this script loaded
+        private int _eventsSpawned;                            // first couple scenes are forced calm
 
         private enum EType { TrafficStop, Arrest, Resist, Gunfight, Gang }
 
@@ -67,6 +71,7 @@ namespace QualifiedImmunity
             _spawnIntervalMax = s.GetValue("AmbientPolice", "SpawnIntervalMaxSeconds", _spawnIntervalMax);
             _spawnDistMin     = s.GetValue("AmbientPolice", "SpawnDistanceMin", _spawnDistMin);
             _spawnDistMax     = s.GetValue("AmbientPolice", "SpawnDistanceMax", _spawnDistMax);
+            _startupGraceSeconds = s.GetValue("AmbientPolice", "StartupGraceSeconds", _startupGraceSeconds);
         }
 
         private void OnAborted(object sender, EventArgs e)
@@ -93,13 +98,26 @@ namespace QualifiedImmunity
                 if (!keep) { Release(ev); _events.RemoveAt(i); }
             }
 
-            if (_events.Count < _maxEvents
+            if (CanStageNow() && _events.Count < _maxEvents
                 && (DateTime.Now - _lastSpawn).TotalSeconds > _nextDelay)
             {
                 _lastSpawn = DateTime.Now;
                 _nextDelay = _spawnIntervalMin + _rng.NextDouble() * Math.Max(1f, _spawnIntervalMax - _spawnIntervalMin);
                 try { SpawnEvent(player); } catch { }
             }
+        }
+
+        // Gate for staging new scenes: nothing right after load or during a loading/
+        // fade/switch screen. The player was spawning straight into gunfire and a
+        // panicking crowd the instant the game started -- this holds it off until the
+        // world is actually loaded in and under player control.
+        private bool CanStageNow()
+        {
+            if ((DateTime.Now - _scriptStart).TotalSeconds < _startupGraceSeconds) return false;
+            if (!Function.Call<bool>(Hash.IS_SCREEN_FADED_IN)) return false;
+            if (Function.Call<bool>(Hash.IS_PLAYER_SWITCH_IN_PROGRESS)) return false;
+            if (!Function.Call<bool>(Hash.IS_PLAYER_CONTROL_ON, Game.Player)) return false;
+            return true;
         }
 
         private void EnsureRels()
@@ -144,10 +162,17 @@ namespace QualifiedImmunity
 
             if (CountAlive(ev.Cops) == 0) { Release(ev); return; }  // spawn failed -> bail
             _events.Add(ev);
+            _eventsSpawned++;
         }
 
         private EType PickType()
         {
+            // The first couple of staged scenes after load are ALWAYS calm (a stop or a
+            // routine arrest) so the world doesn't erupt into gunfire right as ambient
+            // policing comes online.
+            if (_eventsSpawned < 2)
+                return _rng.Next(2) == 0 ? EType.TrafficStop : EType.Arrest;
+
             // Heavily weighted toward routine, calm stops/arrests. The active scenes a player
             // reads as "cops chasing/fighting an NPC" (resist, gunfight, gang) are now a small
             // minority so they stay rare and special -- toned WAY down per feedback that the

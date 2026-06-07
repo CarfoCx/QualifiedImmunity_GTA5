@@ -144,6 +144,13 @@ namespace QualifiedImmunity
             if (Valid(_driver) && !_driver.IsInVehicle(_copCar))
                 Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
 
+            // Fallback: warp a stuck officer back in so the scene-clear can never hang on a
+            // cop looping in and out at the door.
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 7)
+                Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 9)
+                Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
+
             // Wait out the confirm-clear pause before moving on.
             if (SecondsInPhase < _clearDelay) return;
 
@@ -188,12 +195,13 @@ namespace QualifiedImmunity
                     Notify("~b~Dispatch:~w~ Hop back in for another run - or walk away to call it.");
             }
 
-            // Fallback: warp a genuinely stuck officer back in so the unit is never
-            // stranded -- but only after giving the walk-in animation real time to play
-            // (was 12s/14s, which often cut the animation off and looked like a teleport).
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 14)
+            // Fallback: warp a genuinely stuck officer back in so the unit is never stranded.
+            // With the driver door now unlocked the walk-in should just work, so we don't need
+            // to wait long -- a short window kills any residual get-in/get-out loop fast while
+            // still giving the entry animation a moment to play.
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 7)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 16)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 9)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.
