@@ -275,11 +275,11 @@ namespace QualifiedImmunity
                 {
                     foreach (Vehicle v in WorldCache.GetNearbyVehicles(s.Position, 30f))
                     {
-                        if (v != null && v.Exists() && v.IsEngineRunning && !v.HasSiren && v != _copCar)
-                        {
-                            targetVehicle = v;
-                            break;
-                        }
+                        if (v == null || !v.Exists() || !v.IsEngineRunning || v.HasSiren) continue;
+                        if (v == _copCar || v == _suspectCar || v == _suspectCar2) continue; // not our cruiser or their own getaway cars
+                        if (Cops.IsPoliceVehicle(v)) continue;                                // don't "carjack" a police unit
+                        targetVehicle = v;
+                        break;
                     }
                 }
 

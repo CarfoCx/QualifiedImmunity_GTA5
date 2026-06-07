@@ -692,7 +692,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.3:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.4:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1429,11 +1429,7 @@ namespace QualifiedImmunity
         private static bool Valid(Entity ent) { return ent != null && ent.Exists() && !ent.IsDead; }
         private static bool Valid(Vehicle v) { return v != null && v.Exists(); }
 
-        private static bool IsCopPed(Ped p)
-        {
-            if (p == null || !p.Exists()) return false;
-            return p.PedType == PedType.Cop || p.PedType == PedType.Swat;
-        }
+        private static bool IsCopPed(Ped p) { return Cops.IsCop(p); }
 
         private static string SeatName(int s) { return s == 0 ? "front passenger" : "rear"; }
 
@@ -1606,7 +1602,7 @@ namespace QualifiedImmunity
             float dist = (carOk && pl != null && pl.Exists()) ? _copCar.Position.DistanceTo(pl.Position) : -1f;
             bool col = carOk && Function.Call<bool>(Hash.HAS_COLLISION_LOADED_AROUND_ENTITY, _copCar);
             string method = _driveMethod == 2 ? "WANDER" : (_driveMethod == 1 ? "MISSION" : "LONGRANGE");
-            string txt = string.Format("QI v4.1 {0} | spd {1:F1} | drv {2} | eng {3} | dist {4:F0} | col {5} | grnd {6} | {7} | moved {8} | reseat {9}",
+            string txt = string.Format("QI {0} | spd {1:F1} | drv {2} | eng {3} | dist {4:F0} | col {5} | grnd {6} | {7} | moved {8} | reseat {9}",
                 _phase, spd, drv, eng ? "on" : "OFF", dist, col ? "Y" : "N", _copGrounded ? "Y" : "N",
                 method, _everMoved ? "Y" : "N", _reseatCount);
             new GTA.UI.TextElement(txt, new System.Drawing.PointF(10f, 130f), 0.4f,

@@ -558,31 +558,7 @@ namespace QualifiedImmunity
         }
 
         // True for marked LSPD/LSSD/NOOSE vehicles, or anything a cop is driving.
-        private static bool IsPoliceVehicle(Vehicle v)
-        {
-            if (v == null || !v.Exists()) return false;
-            switch ((VehicleHash)v.Model.Hash)
-            {
-                case VehicleHash.Police:
-                case VehicleHash.Police2:
-                case VehicleHash.Police3:
-                case VehicleHash.Police4:
-                case VehicleHash.PoliceOld1:
-                case VehicleHash.PoliceOld2:
-                case VehicleHash.PoliceT:
-                case VehicleHash.Policeb:
-                case VehicleHash.Sheriff:
-                case VehicleHash.Sheriff2:
-                case VehicleHash.FBI:
-                case VehicleHash.FBI2:
-                case VehicleHash.Riot:
-                case VehicleHash.Pranger:
-                case VehicleHash.Polmav:
-                    return true;
-            }
-            Ped d = v.Driver;
-            return d != null && d.Exists() && IsCop(d);
-        }
+        private static bool IsPoliceVehicle(Vehicle v) { return Cops.IsPoliceVehicle(v); }
 
         // -------------------------------------------------------------------
         // Helpers
@@ -645,11 +621,7 @@ namespace QualifiedImmunity
                           "SPEECH_PARAMS_FORCE_SHOUTED", 1);
         }
 
-        private static bool IsCop(Ped p)
-        {
-            if (p == null || !p.Exists()) return false;
-            return p.PedType == PedType.Cop || p.PedType == PedType.Swat;
-        }
+        private static bool IsCop(Ped p) { return Cops.IsCop(p); }
 
         private static bool IsAimingAt(Ped target)
         {

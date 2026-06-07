@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using GTA;
 using GTA.Math;
@@ -6,78 +5,79 @@ using GTA.Native;
 
 namespace QualifiedImmunity
 {
-    // Caches world entities (peds and vehicles) within a large radius once per frame.
-    // Minimizes expensive native calls in crowded areas across all scripts.
+    // Caches world entities (peds and vehicles) within a large radius once per frame so the
+    // many proximity scans across all four scripts don't each hammer the engine.
+    //
+    // The key cost this avoids: a naive scan calls entity.Exists() and entity.Position --
+    // BOTH native calls -- for every entity on every query. With several scans per frame over
+    // a crowded area that's thousands of native round-trips per frame. Here we validate each
+    // entity and snapshot its position EXACTLY ONCE per frame at cache-build time; the
+    // per-query filtering is then pure managed math (no natives), which is dramatically
+    // cheaper when many queries hit the same frame.
     internal static class WorldCache
     {
+        private struct PedRec { public Ped Ped; public Vector3 Pos; }
+        private struct VehRec { public Vehicle Veh; public Vector3 Pos; }
+
         private static int _lastFrame = -1;
-        private static Ped[] _cachedPeds = null;
-        private static Vehicle[] _cachedVehicles = null;
+        // Persistent buffers, cleared and refilled once per frame so the snapshot itself
+        // doesn't allocate fresh arrays every frame. foreach over List<struct> uses the
+        // struct enumerator, so per-query iteration stays allocation-free too.
+        private static readonly List<PedRec> _peds = new List<PedRec>();
+        private static readonly List<VehRec> _vehicles = new List<VehRec>();
         private static Vector3 _cacheCenter = Vector3.Zero;
-        private const float CacheRadius = 250f; // Wide enough to cover all scan radii (max is 160m)
+        // Wide enough to cover every scan radius in the mod (the largest is ~170m, centered
+        // on the cruiser, which is itself next to the player). Kept tight so the once-per-frame
+        // snapshot and the per-query loops stay small.
+        private const float CacheRadius = 200f;
 
         private static void UpdateCacheIfNeeded()
         {
             int currentFrame = Function.Call<int>(Hash.GET_FRAME_COUNT);
-            if (currentFrame == _lastFrame && _cachedPeds != null && _cachedVehicles != null)
-                return;
+            if (currentFrame == _lastFrame) return;
+            _lastFrame = currentFrame;
+
+            _peds.Clear();
+            _vehicles.Clear();
 
             Ped player = Game.Player.Character;
-            if (player != null && player.Exists())
-            {
-                _cacheCenter = player.Position;
-                _cachedPeds = World.GetNearbyPeds(player, CacheRadius);
-                _cachedVehicles = World.GetNearbyVehicles(player, CacheRadius);
-                _lastFrame = currentFrame;
-            }
-            else
-            {
-                _cachedPeds = new Ped[0];
-                _cachedVehicles = new Vehicle[0];
-            }
+            if (player == null || !player.Exists()) return;
+
+            _cacheCenter = player.Position;
+
+            foreach (Ped p in World.GetNearbyPeds(player, CacheRadius))
+                if (p != null && p.Exists()) _peds.Add(new PedRec { Ped = p, Pos = p.Position });
+
+            foreach (Vehicle v in World.GetNearbyVehicles(player, CacheRadius))
+                if (v != null && v.Exists()) _vehicles.Add(new VehRec { Veh = v, Pos = v.Position });
         }
 
         public static List<Ped> GetNearbyPeds(Vector3 pos, float radius)
         {
             UpdateCacheIfNeeded();
-            List<Ped> results = new List<Ped>();
 
-            // If the query exceeds the cached zone, fall back to direct query.
+            // Query reaches outside the cached zone -> fall back to a direct (correct) query.
             if (pos.DistanceTo(_cacheCenter) + radius > CacheRadius)
-            {
                 return new List<Ped>(World.GetNearbyPeds(pos, radius));
-            }
 
             float rSq = radius * radius;
-            foreach (Ped p in _cachedPeds)
-            {
-                if (p != null && p.Exists() && p.Position.DistanceToSquared(pos) <= rSq)
-                {
-                    results.Add(p);
-                }
-            }
+            List<Ped> results = new List<Ped>();
+            foreach (PedRec rec in _peds)
+                if (rec.Pos.DistanceToSquared(pos) <= rSq) results.Add(rec.Ped);
             return results;
         }
 
         public static List<Vehicle> GetNearbyVehicles(Vector3 pos, float radius)
         {
             UpdateCacheIfNeeded();
-            List<Vehicle> results = new List<Vehicle>();
 
-            // If the query exceeds the cached zone, fall back to direct query.
             if (pos.DistanceTo(_cacheCenter) + radius > CacheRadius)
-            {
                 return new List<Vehicle>(World.GetNearbyVehicles(pos, radius));
-            }
 
             float rSq = radius * radius;
-            foreach (Vehicle v in _cachedVehicles)
-            {
-                if (v != null && v.Exists() && v.Position.DistanceToSquared(pos) <= rSq)
-                {
-                    results.Add(v);
-                }
-            }
+            List<Vehicle> results = new List<Vehicle>();
+            foreach (VehRec rec in _vehicles)
+                if (rec.Pos.DistanceToSquared(pos) <= rSq) results.Add(rec.Veh);
             return results;
         }
     }
@@ -101,7 +101,7 @@ namespace QualifiedImmunity
 
                 Ped d = v.Driver;
                 if (d == null || !d.Exists() || d.IsDead || d == player) continue;
-                if (d.PedType == PedType.Cop || d.PedType == PedType.Swat) continue;
+                if (Cops.IsCop(d)) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(d.Handle)) continue;
 
                 float dist = v.Position.DistanceTo(pos);
@@ -122,30 +122,7 @@ namespace QualifiedImmunity
             {
                 if (v == null || !v.Exists()) continue;
                 if (player != null && player.IsInVehicle(v)) continue;
-
-                // Ignore police drivers or police vehicle models
-                Ped d = v.Driver;
-                if (d != null && d.Exists() && (d.PedType == PedType.Cop || d.PedType == PedType.Swat)) continue;
-                
-                switch ((VehicleHash)v.Model.Hash)
-                {
-                    case VehicleHash.Police:
-                    case VehicleHash.Police2:
-                    case VehicleHash.Police3:
-                    case VehicleHash.Police4:
-                    case VehicleHash.PoliceOld1:
-                    case VehicleHash.PoliceOld2:
-                    case VehicleHash.PoliceT:
-                    case VehicleHash.Policeb:
-                    case VehicleHash.Sheriff:
-                    case VehicleHash.Sheriff2:
-                    case VehicleHash.FBI:
-                    case VehicleHash.FBI2:
-                    case VehicleHash.Riot:
-                    case VehicleHash.Pranger:
-                    case VehicleHash.Polmav:
-                        continue;
-                }
+                if (Cops.IsCop(v.Driver) || Cops.IsPoliceModel(v)) continue; // a cop running someone over is "fine"
 
                 if (Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, victim, v, true))
                     return v;
