@@ -690,7 +690,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V5.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.1:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -723,6 +723,16 @@ namespace QualifiedImmunity
             // NOT here. Calling SET_POLICE_IGNORE_PLAYER every frame was THE bug: it resets
             // police-ped AI each call, which froze our own cop driver's task ~60x/sec (the
             // entire "won't drive / 0.0 mph" saga). They're sticky toggles -- set once, done.
+            //
+            // EXCEPTION: clearing the PLAYER's own wanted level is safe (it never touches cop
+            // AI). Boarding/riding in a police cruiser can still slap a 1-star "stolen police
+            // vehicle" flag on the player despite the one-time max-wanted suppression. Reading
+            // the wanted level is cheap, so only re-clear when a star actually shows up.
+            if (Game.Player.Wanted.WantedLevel > 0)
+            {
+                Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+                Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, Game.Player);
+            }
 
             TourniquetTick(player);
 
@@ -1063,7 +1073,11 @@ namespace QualifiedImmunity
             if (!Valid(_copCar)) return;
             Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED, _copCar, 1);               // whole car enterable
             Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED_FOR_PLAYER, _copCar, Game.Player.Handle, false);
-            Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 0, 2); // ...except the driver door
+            // Driver door: lock state 3 = LOCKOUT_PLAYER_ONLY. State 2 (used before) locked
+            // the door for EVERYONE -- so when a cop bailed out to fight on foot he could
+            // never reopen it to re-board (he'd walk to the door and just stand there). State
+            // 3 keeps the player out of the driver seat while letting the AI driver back in.
+            Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 0, 3); // reserve the driver door for the AI
         }
 
         private void PromoteDriverIfNeeded()

@@ -208,9 +208,12 @@ namespace QualifiedImmunity
             // Driver dead but occupants remain -> force the on-foot fight.
             if (!_engaged && !Valid(_suspect)) { _engaged = true; Engage(); return; }
 
-            // Engage early and hard: the moment they're close and the suspect has
-            // slowed at all, they bail and open fire (no waiting for a full stop).
-            if (!_engaged && gap < _engageDistanceThreshold && suspSpeed < _engageSpeedThreshold)
+            // Bail out to finish on foot only once they've genuinely CHASED and cornered the
+            // suspect. The grace period is critical: a freshly-designated suspect is usually
+            // close and momentarily slow, so without it the officers pile out instantly and
+            // never chase. Give the pursuit time to develop first.
+            bool chasedLongEnough = (DateTime.Now - _lastPursuitStart).TotalSeconds > 8.0;
+            if (!_engaged && chasedLongEnough && gap < _engageDistanceThreshold && suspSpeed < _engageSpeedThreshold)
             {
                 _engaged = true;
                 Engage();

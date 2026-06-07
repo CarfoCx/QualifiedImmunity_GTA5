@@ -20,8 +20,8 @@ namespace QualifiedImmunity
         // ---- Config ([AmbientPolice] in QualifiedImmunity.ini) ----
         private bool _enabled = true;
         private int _maxEvents = 2;
-        private float _spawnIntervalMin = 35f;
-        private float _spawnIntervalMax = 75f;
+        private float _spawnIntervalMin = 90f;
+        private float _spawnIntervalMax = 170f;
         private float _spawnDistMin = 60f;
         private float _spawnDistMax = 130f;
         private const float DespawnDist = 300f;   // events past this from the player are torn down
@@ -148,14 +148,17 @@ namespace QualifiedImmunity
 
         private EType PickType()
         {
-            // Weighted toward routine stops/arrests; the dangerous chases/gunfights are the
-            // minority so they stay special (toned down from before).
+            // Heavily weighted toward routine, calm stops/arrests. The active scenes a player
+            // reads as "cops chasing/fighting an NPC" (resist, gunfight, gang) are now a small
+            // minority so they stay rare and special -- toned WAY down per feedback that the
+            // ambient cops were pursuing NPCs too often. Still well above vanilla (which stages
+            // none of this on its own).
             int r = _rng.Next(100);
-            if (r < 34) return EType.TrafficStop; // 34%
-            if (r < 58) return EType.Arrest;      // 24%
-            if (r < 76) return EType.Resist;      // 18%
-            if (r < 92) return EType.Gunfight;    // 16%
-            return EType.Gang;                     //  8%
+            if (r < 48) return EType.TrafficStop; // 48%
+            if (r < 78) return EType.Arrest;      // 30%
+            if (r < 90) return EType.Resist;      // 12%
+            if (r < 97) return EType.Gunfight;    //  7%
+            return EType.Gang;                     //  3%
         }
 
         // A pulled-over scene: civ vehicle at the node, cruiser behind with lights on, an
@@ -167,8 +170,9 @@ namespace QualifiedImmunity
             // FOOT -- you can't taze-ragdoll or hands-up a ped that's sitting in a car seat.
             bool vehicleStop = (ev.Type == EType.TrafficStop);
 
+            // Parked stop -> NO siren (lights/siren is what makes every pedestrian bolt).
+            // A stop is a calm scene; only gunfights get sirens.
             ev.CopCar = SpawnVehicle(VehicleHash.Police3, spot - fwd * 8f, heading);
-            if (ev.CopCar != null) ev.CopCar.IsSirenActive = true;
 
             Ped suspect;
             if (vehicleStop)
@@ -339,7 +343,13 @@ namespace QualifiedImmunity
                     Function.Call(Hash.TASK_COMBAT_PED, s, t, 0, 16);
             }
             CombatList(ev.Cops, ev);
-            foreach (Entity b in ev.Backup) { Ped bp = b as Ped; if (Valid(bp)) CombatOne(bp, ev); }
+            // Backup only engages once it has actually ARRIVED -- otherwise it stops mid-drive
+            // and shoots from across the map instead of responding to the scene.
+            foreach (Entity b in ev.Backup)
+            {
+                Ped bp = b as Ped;
+                if (Valid(bp) && bp.Position.DistanceTo(ev.Where) < 45f) CombatOne(bp, ev);
+            }
         }
 
         private void CombatList(List<Ped> cops, Ev ev)
@@ -409,6 +419,13 @@ namespace QualifiedImmunity
                 ? (_rng.Next(2) == 0 ? WeaponHash.CarbineRifle : WeaponHash.PumpShotgun)
                 : (_rng.Next(2) == 0 ? WeaponHash.PumpShotgun : WeaponHash.SMG);
             Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)w), 250, false, true);
+            // Act like a real responding officer: pile out of the car, use cover, and
+            // engage at a sensible range rather than charging blindly.
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 3, true);   // CanLeaveVehicle -> get out and fight
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 0, true);   // CanUseCover
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 42, true);  // CanFlank
+            Function.Call(Hash.SET_PED_COMBAT_RANGE, c, 1);              // medium range
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, c, 2);           // professional
             if (heavy) { Function.Call(Hash.SET_PED_ARMOUR, c, 50); Function.Call(Hash.SET_PED_ACCURACY, c, 65); }
         }
 
