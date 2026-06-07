@@ -693,7 +693,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.6:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1381,35 +1381,7 @@ namespace QualifiedImmunity
             SetPhase(Phase.Idle);
         }
 
-        private Camera _newsCam = null;
-
-        private void ToggleNewsChopperCamera()
-        {
-            if (_newsCam != null)
-            {
-                StopNewsCam();
-                Notify("~g~You:~w~ Switching back to bodycam.");
-                return;
-            }
-
-            if (!Valid(_suspect)) return;
-
-            Vector3 camPos = _suspect.Position + new Vector3(0, 0, 80f);
-            _newsCam = Camera.Create(ScriptedCameraNameHash.DefaultScriptedCamera,
-                                     camPos, Vector3.Zero, 60f, true, EulerRotationOrder.YXZ);
-            _newsCam.PointAt(_suspect);
-            ScriptCameraDirector.StartRendering();
-            Notify("~r~Weazel News:~w~ Live eyes on the pursuit!");
-        }
-
-        // Stop rendering the news-chopper cam and tear it down (null-safe).
-        private void StopNewsCam()
-        {
-            if (_newsCam == null) return;
-            ScriptCameraDirector.StopRendering(false);
-            if (_newsCam.Exists()) _newsCam.Delete();
-            _newsCam = null;
-        }
+        private Camera _newsCam = null;   // the heli gimbal cam (see RideAlong.HeliCam.cs)
 
         private void PlantEvidence()
         {
@@ -1517,12 +1489,12 @@ namespace QualifiedImmunity
 
         private void DrawHUD()
         {
-            if (_newsCam != null && _newsCam.Exists() && Valid(_suspect))
+            // Heli sensor feed active -> it replaces the normal overlay for visual clarity.
+            if (_newsCam != null && _newsCam.Exists())
             {
-                _newsCam.Position = _suspect.Position + new Vector3(0, -20f, 60f);
-                _newsCam.PointAt(_suspect);
-                new GTA.UI.TextElement("LIVE: WEAZEL NEWS", new System.Drawing.PointF(600f, 30f), 0.7f, System.Drawing.Color.Red).Draw();
-                new GTA.UI.TextElement("BREAKING: HIGH SPEED PURSUIT", new System.Drawing.PointF(600f, 50f), 0.5f, System.Drawing.Color.White).Draw();
+                UpdateHeliCam();
+                DrawHeliCamHud();
+                return;
             }
 
             if (_phase == Phase.Pursuit || _engaged)
@@ -1532,7 +1504,7 @@ namespace QualifiedImmunity
                 new GTA.UI.TextElement(string.Format("THREAT: {0}", threatLevelStr), new System.Drawing.PointF(10f, 10f), 0.45f, System.Drawing.Color.Red).Draw();
                 new GTA.UI.TextElement(string.Format("BACKUP UNITS: {0}", _backupCount), new System.Drawing.PointF(10f, 30f), 0.45f, System.Drawing.Color.White).Draw();
                 new GTA.UI.TextElement(string.Format("PURSUIT TIME: {0:D2}:{1:D2}", time.Minutes, time.Seconds), new System.Drawing.PointF(10f, 50f), 0.45f, System.Drawing.Color.Yellow).Draw();
-                new GTA.UI.TextElement("COMMANDS: UP (Ram), DOWN (Back Off), RIGHT (Drive-by), LEFT (News Cam)", new System.Drawing.PointF(10f, 70f), 0.35f, System.Drawing.Color.LightGray).Draw();
+                new GTA.UI.TextElement("COMMANDS: UP (Ram), DOWN (Back Off), RIGHT (Drive-by), LEFT (Heli Cam)", new System.Drawing.PointF(10f, 70f), 0.35f, System.Drawing.Color.LightGray).Draw();
             }
         }
 
@@ -1542,6 +1514,20 @@ namespace QualifiedImmunity
         {
             if (_phase != Phase.Pursuit && !_engaged) return;
             if (Game.Player.Character == null || !Game.Player.Character.IsInVehicle(_copCar)) return;
+
+            // D-Pad Left always toggles the heli sensor feed.
+            bool camOn = _newsCam != null;
+            if (Game.IsControlJustPressed(GTA.Control.PhoneLeft)) ToggleNewsChopperCamera();
+
+            if (camOn)
+            {
+                // While the feed is up, the D-pad drives the CAMERA, not the cruiser:
+                // Up/Down = optical zoom, Right = cycle EO/Night-Vision/Thermal optics.
+                if (Game.IsControlJustPressed(GTA.Control.PhoneUp)) HeliCamZoomStep(+1);
+                if (Game.IsControlJustPressed(GTA.Control.PhoneDown)) HeliCamZoomStep(-1);
+                if (Game.IsControlJustPressed(GTA.Control.PhoneRight)) HeliCamCycleOptics();
+                return;
+            }
 
             // D-Pad Up: Ram
             if (Game.IsControlJustPressed(GTA.Control.PhoneUp))
@@ -1577,11 +1563,6 @@ namespace QualifiedImmunity
                     if (_engageSpeedThreshold > 40f) _engageSpeedThreshold = 40f;
                     DriveBy(_partner, _suspect);
                 }
-            }
-            // D-Pad Left: News Chopper
-            if (Game.IsControlJustPressed(GTA.Control.PhoneLeft))
-            {
-                ToggleNewsChopperCamera();
             }
         }
 
