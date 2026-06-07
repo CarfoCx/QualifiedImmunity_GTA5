@@ -155,8 +155,19 @@ namespace QualifiedImmunity
         {
             for (int i = _bodies.Count - 1; i >= 0; i--)
             {
-                Ped p = (Ped)Entity.FromHandle(_bodies[i]);
-                if (p == null || !p.Exists()) Forget(_bodies[i], i);
+                int handle = _bodies[i];
+                Ped p = (Ped)Entity.FromHandle(handle);
+                if (p == null || !p.Exists()) { Forget(handle, i); continue; }
+
+                // Revived since we pinned it (e.g. a ride-along medic tourniqueted a
+                // fatally-injured officer back to life). It's no longer a corpse, so let it
+                // go -- otherwise an ambulance would later "recover" and delete a living ped.
+                // Don't yank one that's already mid-recovery.
+                if (!IsCollectibleBody(p) && !IsServiced(handle))
+                {
+                    p.MarkAsNoLongerNeeded();
+                    Forget(handle, i);
+                }
             }
 
             // Drop released handles whose peds have despawned so the blacklist can't

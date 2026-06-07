@@ -132,10 +132,14 @@ namespace QualifiedImmunity
                 // Make every cop a max-aggression, never-flee shooter.
                 ApplyGangCombatProfile(cop);
 
-                // Grudge boils over -> they come for the player specifically.
+                // Grudge boils over -> they come for the player specifically. Only (re)issue
+                // the combat task if they aren't already fighting the player -- re-tasking
+                // every tick restarts the behavior and makes the AI stutter (same guard
+                // SicCopsOn uses for assault responders).
                 if (meter >= _annoyanceThreshold)
                 {
-                    cop.Task.Combat(player);
+                    if (!Function.Call<bool>(Hash.IS_PED_IN_COMBAT, cop, player))
+                        cop.Task.Combat(player);
                     MaybeCollateral(cop, player);
                 }
 

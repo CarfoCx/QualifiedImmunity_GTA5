@@ -252,6 +252,7 @@ namespace QualifiedImmunity
 
         private void OnAborted(object sender, EventArgs e)
         {
+            StopPhoneRing();   // the looping dispatch ring owns a sound id -> release it or it leaks on reload
             Cleanup();
         }
 
@@ -692,7 +693,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.4:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -972,6 +973,7 @@ namespace QualifiedImmunity
                                 Notify("~g~Dispatch:~w~ Suspect down. Now THAT'S community policing!");
                             }
                             EndSirens();
+                            StopNewsCam();   // pursuit's over -> don't leave the news cam stuck on a corpse
                             SetPhase(Phase.Regroup);
                             return;
                         }
@@ -988,6 +990,7 @@ namespace QualifiedImmunity
                             {
                                 Notify("~y~Dispatch:~w~ Suspect got away! Call off the pursuit.");
                                 EndSirens();
+                                StopNewsCam();   // pursuit's over -> tear the news cam down
                                 SetPhase(Phase.Regroup);
                                 return;
                             }
@@ -1410,13 +1413,16 @@ namespace QualifiedImmunity
 
         private void PlantEvidence()
         {
-            Ped deadSuspect = _suspect;
-            if (!Valid(deadSuspect) || !deadSuspect.IsDead)
+            // NOTE: this fires for a DEAD suspect, so we must check existence directly --
+            // Valid() resolves to the Entity overload, which is false for any dead ped, so
+            // using it here made the whole "plant a weapon on the body" beat never run.
+            Ped deadSuspect = (_suspect != null && _suspect.Exists() && _suspect.IsDead) ? _suspect : null;
+            if (deadSuspect == null)
             {
-                foreach(Ped p in _suspectPeds) { if (Valid(p) && p.IsDead) { deadSuspect = p; break; } }
+                foreach (Ped p in _suspectPeds) { if (p != null && p.Exists() && p.IsDead) { deadSuspect = p; break; } }
             }
-            if (!Valid(deadSuspect)) { Notify("~g~Dispatch:~w~ Suspect dealt with. Good work."); return; }
-            
+            if (deadSuspect == null) { Notify("~g~Dispatch:~w~ Suspect dealt with. Good work."); return; }
+
             Ped closestCop = Valid(_driver) ? _driver : (Valid(_partner) ? _partner : null);
             if (Valid(closestCop) && !closestCop.IsInVehicle())
             {
