@@ -31,7 +31,7 @@ namespace QualifiedImmunity
         private float _pitMinSpeed = 7.0f;
         private float _pitCooldownSeconds = 8.0f;
         private float _engageDistanceThreshold = 16.0f; // only bail out of the car when right on top
-        private float _engageSpeedThreshold = 6.0f;     // ...of a suspect that's actually slowed/cornered
+        private float _engageSpeedThreshold = 2.5f;     // ...of a suspect whose car has actually STOPPED
         private float _idealFollowDistance = 16.0f;
         private float _escapeDistance = 160.0f;
         private float _escapeTimeLimit = 25.0f;
@@ -118,6 +118,7 @@ namespace QualifiedImmunity
         private bool _pitting;
         private DateTime _pitSince = DateTime.MinValue;
         private DateTime _lastPit = DateTime.MinValue;
+        private DateTime _suspectStoppedSince = DateTime.MinValue; // when the fleeing car actually stopped
         private DateTime _lastCollateral = DateTime.MinValue;
         private DateTime _lastProgress = DateTime.MinValue;   // en-route stuck/fail detection
         private float _lastEnRouteDist = float.MaxValue;       // track closing distance, not just speed
@@ -691,7 +692,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.2:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.3:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1184,6 +1185,38 @@ namespace QualifiedImmunity
             // plow into objects with no real pathing during a pursuit.
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_PreferNavmeshInChase, false);
             Function.Call(Hash.SET_PED_STAY_IN_VEHICLE_WHEN_JACKED, p, true);
+        }
+
+        // Put a unit back into calm, road-following PATROL driving after a pursuit/assist.
+        // A chase leaves the driver on an aggressive vehicle-chase/ram task (and the
+        // AvoidTraffic chase style). If we don't CLEAR that and re-issue a normal drive, the
+        // cruiser keeps the chase behavior -- cutting corners and plowing off the road into
+        // buildings. That's the "AI breaks after one pursuit" bug.
+        private void RestorePatrolDriving(Ped p)
+        {
+            if (!Valid(p)) return;
+            Function.Call(Hash.SET_PED_AS_COP, p, false);   // script owns the ped, not police dispatch
+            Function.Call(Hash.CLEAR_PED_TASKS, p);          // drop the leftover chase/ram task
+            MakeGoodDriver(p);                               // full skill, low aggression, steer around stuff
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, _driverAggressiveness);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_PreferNavmeshInChase, false); // follow roads
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, CA_CanLeaveVehicle, false);       // stay in the car
+        }
+
+        // Resume normal patrol after a pursuit/assist: clean both officers' driving, drop the
+        // siren, and hand the driver a fresh lawful wander task right now (don't wait for the
+        // stall timer, or the leftover chase task keeps driving the car off-road first).
+        private void ResumePatrol()
+        {
+            RestorePatrolDriving(_driver);
+            if (Valid(_partner)) RestorePatrolDriving(_partner);
+            EndSirens();
+            if (Valid(_driver) && Valid(_copCar))
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, DRIVE_STYLE);
+            _lastWander = DateTime.Now;
+            _lastCarMoving = DateTime.Now;
+            ResetRideDelay();
+            SetPhase(Phase.Riding);
         }
 
         private bool HasPlayerAssaultedCiviliansOrCops()

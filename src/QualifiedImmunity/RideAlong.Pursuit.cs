@@ -79,6 +79,7 @@ namespace QualifiedImmunity
             _lastReissue = DateTime.Now;
             _lastCarMoving = DateTime.Now;    // give the fresh chase task time to spool up
             _escapeTimerStarted = DateTime.MinValue; // reset escape timer
+            _suspectStoppedSince = DateTime.MinValue; // reset the "car has stopped" tracker
             _lastPursuitStart = DateTime.Now; // track UI timer
 
             CopBark(_driver, "GENERIC_WAR_CRY"); // a single voiced bark, no extra ticker line
@@ -208,12 +209,22 @@ namespace QualifiedImmunity
             // Driver dead but occupants remain -> force the on-foot fight.
             if (!_engaged && !Valid(_suspect)) { _engaged = true; Engage(); return; }
 
-            // Bail out to finish on foot only once they've genuinely CHASED and cornered the
-            // suspect. The grace period is critical: a freshly-designated suspect is usually
-            // close and momentarily slow, so without it the officers pile out instantly and
-            // never chase. Give the pursuit time to develop first.
-            bool chasedLongEnough = (DateTime.Now - _lastPursuitStart).TotalSeconds > 8.0;
-            if (!_engaged && chasedLongEnough && gap < _engageDistanceThreshold && suspSpeed < _engageSpeedThreshold)
+            // CHASE until the vehicle actually STOPS -- don't turn it into an instant
+            // shootout. A pursuit should be: chase the car, run drive-bys, attempt PITs, and
+            // only bail out on foot once the suspect's vehicle has come to a real stop (PITted,
+            // crashed, or boxed in) and STAYED stopped for a beat. Tracking a sustained stop
+            // (not just "slowed") stops the officers from piling out every time the suspect
+            // taps the brakes in traffic.
+            if (suspSpeed < _engageSpeedThreshold)
+            {
+                if (_suspectStoppedSince == DateTime.MinValue) _suspectStoppedSince = DateTime.Now;
+            }
+            else _suspectStoppedSince = DateTime.MinValue;
+
+            bool chasedLongEnough = (DateTime.Now - _lastPursuitStart).TotalSeconds > 6.0;
+            bool suspectParked = _suspectStoppedSince != DateTime.MinValue
+                                 && (DateTime.Now - _suspectStoppedSince).TotalSeconds > 1.5;
+            if (!_engaged && chasedLongEnough && gap < _engageDistanceThreshold && suspectParked)
             {
                 _engaged = true;
                 Engage();

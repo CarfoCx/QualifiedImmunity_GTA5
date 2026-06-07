@@ -144,11 +144,11 @@ namespace QualifiedImmunity
             if (Valid(_driver) && !_driver.IsInVehicle(_copCar))
                 Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
 
-            // Fallback: warp a stuck officer back in so the scene-clear can never hang on a
-            // cop looping in and out at the door.
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 7)
+            // Fallback: warp a stuck officer back in so the scene-clear can never hang -- but
+            // only after giving the walk-in animation real time to play.
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 9)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // Wait out the confirm-clear pause before moving on.
@@ -173,8 +173,7 @@ namespace QualifiedImmunity
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
             {
                 Notify("~g~Officer:~w~ Scene's clear. Back on patrol.");
-                ResetRideDelay();
-                SetPhase(Phase.Riding);
+                ResumePatrol();
             }
         }
 
@@ -196,12 +195,13 @@ namespace QualifiedImmunity
             }
 
             // Fallback: warp a genuinely stuck officer back in so the unit is never stranded.
-            // With the driver door now unlocked the walk-in should just work, so we don't need
-            // to wait long -- a short window kills any residual get-in/get-out loop fast while
-            // still giving the entry animation a moment to play.
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 7)
+            // Give the animated walk-in real time first (a cop can be several meters away
+            // after a foot chase). With the door unlocked + police-AI off, the walk-in
+            // normally finishes well before this, so the warp only fires if they're truly
+            // stuck -- you see the animation, not an instant teleport.
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 9)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18)
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.
@@ -223,15 +223,18 @@ namespace QualifiedImmunity
             // Player chose to stay aboard and a driver is ready -> resume patrol.
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
             {
-                ResetRideDelay();
                 Notify("~g~Back on patrol.");
-                SetPhase(Phase.Riding);
+                ResumePatrol();
             }
         }
 
         private void ReboardCop(Ped c, int seat)
         {
             if (!Valid(c) || c.IsInVehicle(_copCar)) return;
+            // Take them off police dispatch AI first -- otherwise the game culls our
+            // enter-vehicle task and the cop never actually walks in (which then trips the
+            // warp fallback and looks like an instant teleport instead of an animation).
+            Function.Call(Hash.SET_PED_AS_COP, c, false);
             // CRITICAL: the combat "finish them" task was locked on with KEEP_TASK; while
             // that lock is on, the ped REJECTS the enter-vehicle task and just stands there.
             // Release it first so they accept the re-board. (Also re-enable vehicle use,
