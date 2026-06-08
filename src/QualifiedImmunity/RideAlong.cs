@@ -696,7 +696,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.7:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.8:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1522,6 +1522,9 @@ namespace QualifiedImmunity
         {
             if (_phase != Phase.Pursuit && !_engaged) return;
             if (Game.Player.Character == null || !Game.Player.Character.IsInVehicle(_copCar)) return;
+            // Dispatch phone is up -> it owns the D-pad (menu nav). Don't also ram/zoom/toggle
+            // the cam off the same presses.
+            if (_phoneOpen) return;
 
             // D-Pad Left always toggles the heli sensor feed.
             bool camOn = _newsCam != null;

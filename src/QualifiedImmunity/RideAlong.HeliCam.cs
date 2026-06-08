@@ -111,7 +111,9 @@ namespace QualifiedImmunity
         // handheld sway so it reads as a real airborne gimbal rather than a locked tripod.
         private Vector3 HeliCamComputePos(Vector3 focus)
         {
-            if (Valid(_heli)) return _heli.Position + new Vector3(0f, 0f, -1.6f);
+            // Mount under the real chopper only while it's actually flyable -- a wrecked heli
+            // still "exists", and mounting the feed on a smoking wreck on the ground looks broken.
+            if (Valid(_heli) && IsDriveable(_heli)) return _heli.Position + new Vector3(0f, 0f, -1.6f);
 
             double t = (DateTime.Now - _heliCamSince).TotalSeconds;
             double ang = t * 0.18;                 // slow orbit (~rad/s)
@@ -187,9 +189,9 @@ namespace QualifiedImmunity
             if (blink) Rect(0.028f, 0.072f, 0.007f, 0.012f, 220, 45, 45, 235);
             HeliText("      REC   " + clock, 0.02f, 0.060f, 0.32f, r, g, b);
 
-            // top-right: optics + zoom
-            HeliText("OPTICS: " + OpticsShort[_heliCamMode], 0.79f, 0.030f, 0.32f, r, g, b);
-            HeliText("ZOOM x" + _heliCamZoom.ToString("0") + "  FOV " + ((int)ZoomToFov(_heliCamZoom)), 0.79f, 0.060f, 0.32f, r, g, b);
+            // top-right: optics + zoom (kept inboard so the longest line stays on-screen)
+            HeliText("OPTICS: " + OpticsShort[_heliCamMode], 0.74f, 0.030f, 0.32f, r, g, b);
+            HeliText("ZOOM x" + _heliCamZoom.ToString("0") + "  FOV " + ((int)ZoomToFov(_heliCamZoom)), 0.74f, 0.060f, 0.32f, r, g, b);
 
             // top-centre: track/lock status
             if (locked) HeliText("* LOCK *", 0.5f, 0.085f, 0.36f, 120, 255, 120, true);
