@@ -133,12 +133,15 @@ namespace QualifiedImmunity
         private void UpdateHeliCam()
         {
             if (_newsCam == null || !_newsCam.Exists()) return;
+            Function.Call(Hash.HIDE_HUD_AND_RADAR_THIS_FRAME);
             Vector3 focus = HeliCamFocus();
+            // Target momentarily gone (about to be torn down this tick) -> hold the last
+            // framing instead of whipping the camera to the map origin for a frame.
+            if (focus == Vector3.Zero) return;
             _heliCamPos = HeliCamComputePos(focus);
             _newsCam.Position = _heliCamPos;
             if (Valid(_suspect)) _newsCam.PointAt(_suspect); else _newsCam.PointAt(focus);
             _newsCam.FieldOfView = ZoomToFov(_heliCamZoom);
-            Function.Call(Hash.HIDE_HUD_AND_RADAR_THIS_FRAME);
         }
 
         // -------------------------------------------------------------------
@@ -169,7 +172,7 @@ namespace QualifiedImmunity
 
             // --- telemetry ---
             float spdMps = tgt != null
-                ? (tgt.IsInVehicle() ? tgt.CurrentVehicle.Speed : tgt.Speed)
+                ? (tgt.IsInVehicle() && tgt.CurrentVehicle != null ? tgt.CurrentVehicle.Speed : tgt.Speed)
                 : (Valid(_suspectCar) ? _suspectCar.Speed : 0f);
             int mph = (int)Math.Round(spdMps * 2.23694f);
             int hdg = tgt != null ? (int)tgt.Heading : (Valid(_suspectCar) ? (int)_suspectCar.Heading : 0);

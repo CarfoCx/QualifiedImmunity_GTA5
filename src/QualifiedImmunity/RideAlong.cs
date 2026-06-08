@@ -488,6 +488,9 @@ namespace QualifiedImmunity
         // keep the ride going, instead of just ending it. Capped by MaxReplacementUnits.
         private void DispatchReplacementOrEnd(string reason)
         {
+            // The replacement path leaves the Pursuit phase, so UpdateHeliCam stops running --
+            // cut the feed here or it'd freeze with its optics (NV/thermal) stuck on screen.
+            StopNewsCam();
             Ped player = Game.Player.Character;
             if (player == null || !player.Exists()) { Cleanup(); return; }
             if (_replacementsUsed >= _maxReplacementUnits)
@@ -693,7 +696,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.6:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.7:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -701,13 +704,18 @@ namespace QualifiedImmunity
             PhoneTick();   // the cell-phone dispatch menu (works whether or not a ride is active)
             if (_phase == Phase.Idle) return;
 
+            // Player went down -> end the ride cleanly NOW. Otherwise the unit keeps
+            // patrolling with a dead player and (with the heli feed up) the camera and its
+            // night-vision/thermal optics would stay stuck over the wasted screen. Cleanup
+            // tears the cam/optics down and restores the wanted system.
+            Ped player = Game.Player.Character;
+            if (player == null || !player.Exists() || player.IsDead) { Cleanup(); return; }
+
             // Unit lost (wrecked cruiser, or all officers down) -> dispatch a replacement
             // and keep the ride going, until the replacement budget runs out.
             if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's wrecked."); return; }
             PromoteDriverIfNeeded();
             if (!Valid(_driver)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Officers are down."); return; }
-
-            Ped player = Game.Player.Character;
 
             // Scope police ignore player down. Forgive only when helper returns true (part 7).
             // The assault sweep is an 80m ped scan, so throttle it to ~1/sec; the
