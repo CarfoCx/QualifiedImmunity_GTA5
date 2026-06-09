@@ -148,8 +148,13 @@ namespace QualifiedImmunity
 
             float dt = Interval / 1000f;
 
+            // A ride-along player is ONE OF US: while a ride is active the badges
+            // don't take provocation from their own deputy, and a boiled-over grudge
+            // never turns into an attack on them. (Meters still decay below.)
+            bool ridealong = RideAlongRegistry.Active;
+
             // Passive provocation: honking, aiming at, or crowding a cop.
-            DetectPassiveProvocation(player);
+            if (!ridealong) DetectPassiveProvocation(player);
 
             // Controller provoke chord: hold Take-Cover (RB) + tap Reload.
             PollControllerProvoke();
@@ -178,8 +183,9 @@ namespace QualifiedImmunity
                 // Grudge boils over -> they come for the player specifically. Only (re)issue
                 // the combat task if they aren't already fighting the player -- re-tasking
                 // every tick restarts the behavior and makes the AI stutter (same guard
-                // SicCopsOn uses for assault responders).
-                if (meter >= _annoyanceThreshold)
+                // SicCopsOn uses for assault responders). Suppressed during a ride-along:
+                // the brotherhood doesn't jump its own deputy.
+                if (!ridealong && meter >= _annoyanceThreshold)
                 {
                     if (!Function.Call<bool>(Hash.IS_PED_IN_COMBAT, cop, player))
                         cop.Task.Combat(player);
@@ -231,6 +237,21 @@ namespace QualifiedImmunity
         private void ProvokeNearbyCops(float radius)
         {
             Ped player = Game.Player.Character;
+
+            // During a ride-along, flipping off the badges is just banter between
+            // colleagues -- one of them laughs it off instead of holding a grudge.
+            if (RideAlongRegistry.Active)
+            {
+                foreach (Ped cop in WorldCache.GetNearbyPeds(player.Position, radius))
+                {
+                    if (!IsCop(cop) || cop.IsDead) continue;
+                    CopSpeak(cop, "GENERIC_HOWS_IT_GOING");
+                    GTA.UI.Notification.PostTicker("~b~" + CopNames.For(cop) + ":~w~ HA! Good one, deputy.", false);
+                    break; // one reaction is plenty
+                }
+                return;
+            }
+
             foreach (Ped cop in WorldCache.GetNearbyPeds(player.Position, radius))
             {
                 if (!IsCop(cop) || cop.IsDead) continue;

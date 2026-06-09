@@ -92,6 +92,7 @@ namespace QualifiedImmunity
         private bool _enableTourniquet = true;
         private DateTime _lastTourniquet = DateTime.MinValue;
         private DateTime _lastAssaultScan = DateTime.MinValue;
+        private DateTime _lastCoverUp = DateTime.MinValue;   // throttle the cover-up lines
 
         // Connected to local PD: the live ambient engagement we're backing up.
         private Ped _threat;
@@ -163,19 +164,34 @@ namespace QualifiedImmunity
             "Dispatch, define 'unarmed.' He had FISTS. Two of them!"
         };
 
-        // Spoken by the driver when the player boards - a funny heads-up on the ride.
+        // Spoken by the driver when the player boards. The player is ONE OF US: an
+        // honorary deputy wrapped in the same magic force field -- never the butt of
+        // the joke. Keep in sync (order + count) with $welcome in tools/gen_audio.ps1.
         private static readonly string[] Welcome =
         {
-            "Buckle up. Statistically, someone's getting tased today. Might be you.",
-            "Welcome aboard! House rules: no seatbelt jokes, the airbags are decorative.",
-            "Glad you're here. If I yell 'GUN,' it's probably my coffee. Probably.",
-            "Ride-along waiver? Signed it for you. In crayon. You're covered. Maybe.",
-            "Sit tight. Today's itinerary: a chase, a misunderstanding, and great snacks.",
-            "Touch the radio and you walk home. Touch the siren and you're hired.",
-            "Strap in. We do everything by the book - we just haven't read the book.",
-            "Good to have you! If things get loud, that's just community outreach.",
-            "Climb in. I haven't lost a ride-along yet. The paperwork would be brutal.",
-            "Welcome aboard. Remember: everything I do today is, technically, legal-ish."
+            "Welcome aboard, deputy! As of right now you're one of us. Legally? Don't worry about it.",
+            "Climb in! Anything you do today is officially 'departmental procedure'.",
+            "Good to have you, partner. Whatever happens out there, it was justified.",
+            "Welcome to the brotherhood! Your immunity paperwork is verbal. It's verbal.",
+            "Buckle up, partner. You're covered by the same magic force field we are.",
+            "You ride with us, you're family. Family with plausible deniability.",
+            "Welcome aboard! Rule one: we protect our own. That's you now. Congrats.",
+            "New partner, huh? Here's your imaginary badge. Works exactly like a real one.",
+            "Glad you're here, deputy. Whatever you see today, you also didn't see.",
+            "Hop in! By riding with us you are now, legally, 'an ongoing investigation'."
+        };
+
+        // Spoken when the ride-along player wings a civilian: you're one of us, so
+        // the cover-up machine activates on your behalf. Keep in sync (order +
+        // count) with $cover in tools/gen_audio.ps1.
+        private static readonly string[] CoverUp =
+        {
+            "I saw the whole thing. The civilian assaulted your bullet.",
+            "He was charging you. From behind. While fleeing. Textbook.",
+            "Relax, deputy. That's exactly what the settlement fund is for.",
+            "Nice grouping! I'll put 'resisting' in the report.",
+            "Whoa there! ...Eh, he probably had warrants. Carry on.",
+            "Don't sweat it. You're one of us -- that never happened."
         };
 
         // PIT-maneuver chatter: asks permission, laughs, does it anyway.
@@ -721,7 +737,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.2:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.3:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -742,24 +758,39 @@ namespace QualifiedImmunity
             PromoteDriverIfNeeded();
             if (!Valid(_driver)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Officers are down."); return; }
 
-            // Scope police ignore player down. Forgive only when helper returns true (part 7).
-            // The assault sweep is an 80m ped scan, so throttle it to ~1/sec; the
-            // wanted-level/ignore upkeep still runs every tick to hold the state.
+            // The ride-along player is ONE OF US -- an honorary deputy wrapped in the
+            // same protection the badges enjoy. Wing a civilian and the cover-up
+            // machine activates on your behalf. The ONE unforgivable crime is hurting
+            // a fellow officer: the brotherhood turns on you instantly. (Civilians are
+            // paperwork; cops are family.) 80m ped scan, throttled to ~1/sec.
             if ((DateTime.Now - _lastAssaultScan).TotalSeconds > 1.0)
             {
                 _lastAssaultScan = DateTime.Now;
-                if (HasPlayerAssaultedCiviliansOrCops())
+                Ped victim = FindPlayerVictim();
+                if (victim != null)
                 {
-                    Notify("~r~Officer:~w~ You just hit a civilian! You're going DOWN!");
-                    Cleanup();
-                    // The satire's core asymmetry, played straight: an officer gets paid
-                    // leave for that; the ride-along civilian gets the full machinery of
-                    // the law. Cleanup() has already restored the wanted system, so the
-                    // stars actually stick.
-                    Notify("~b~Dispatch:~w~ Be advised: suspect does NOT have qualified immunity. All units respond.");
-                    Function.Call(Hash.SET_PLAYER_WANTED_LEVEL, Game.Player, 2, false);
-                    Function.Call(Hash.SET_PLAYER_WANTED_LEVEL_NOW, Game.Player, false);
-                    return;
+                    if (IsCopPed(victim))
+                    {
+                        Notify("~r~Officer:~w~ You shot a COP?! Your immunity is REVOKED!");
+                        Cleanup();
+                        // Cleanup() restored the wanted system, so the stars stick.
+                        Notify("~b~Dispatch:~w~ Be advised: ride-along's deputy status is RESCINDED. All units respond.");
+                        Function.Call(Hash.SET_PLAYER_WANTED_LEVEL, Game.Player, 2, false);
+                        Function.Call(Hash.SET_PLAYER_WANTED_LEVEL_NOW, Game.Player, false);
+                        return;
+                    }
+
+                    // A civilian. Clear the damage record so each incident is covered
+                    // exactly once, then the driver writes the report for you.
+                    Function.Call(Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY, victim);
+                    if ((DateTime.Now - _lastCoverUp).TotalSeconds > 20)
+                    {
+                        _lastCoverUp = DateTime.Now;
+                        int i = _rng.Next(CoverUp.Length);
+                        Notify("~b~" + (Valid(_driver) ? CopNames.For(_driver) : "Officer") + ":~w~ " + CoverUp[i]);
+                        QIAudio.PlayCover(i);
+                        CopBark(_driver, "GENERIC_HOWS_IT_GOING");
+                    }
                 }
             }
             // NOTE: police-ignore + wanted suppression are set ONCE in RequestRideAlong,
@@ -1321,25 +1352,27 @@ namespace QualifiedImmunity
             SetPhase(Phase.Riding);
         }
 
-        private bool HasPlayerAssaultedCiviliansOrCops()
+        // The nearest ped (civilian or non-friendly cop) the player has injured or
+        // killed, or null. Suspects and the ride's own officers don't count.
+        private Ped FindPlayerVictim()
         {
             Ped player = Game.Player.Character;
-            if (player == null) return false;
+            if (player == null) return null;
 
             foreach (Ped p in WorldCache.GetNearbyPeds(player.Position, 80f))
             {
                 if (p == null || !p.Exists() || p == player) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(p.Handle)) continue;
                 if (IsSuspectPed(p)) continue;
-                
-                // Only count actual damage (injuring or killing a civilian/non-friendly cop)
-                if ((p.IsDead || p.Health < p.MaxHealth) && 
+
+                // Only count actual damage (injuring or killing them)
+                if ((p.IsDead || p.Health < p.MaxHealth) &&
                     Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, p, player, true))
                 {
-                    return true;
+                    return p;
                 }
             }
-            return false;
+            return null;
         }
 
         private void RadioChatter()
@@ -1873,6 +1906,7 @@ namespace QualifiedImmunity
         public static void PlayCollateralA(int i) { Play("collateral_a_" + i + ".wav"); }
         public static void PlaySettlement(int i) { Play("settlement_" + i + ".wav"); }
         public static void PlayIaVerdict(int i) { Play("ia_" + i + ".wav"); }
+        public static void PlayCover(int i) { Play("cover_" + i + ".wav"); }
 
         private static void Play(string file)
         {

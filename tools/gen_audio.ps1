@@ -113,17 +113,19 @@ $taunt = @(
     "I felt threatened. From over there.",
     "Administrative leave, here I come!"
 )
+# The player is ONE OF US -- honorary deputy, never the butt of the joke.
+# Keep in sync with Welcome[] in RideAlong.cs.
 $welcome = @(
-    "Buckle up. Statistically, someone's getting tased today. Might be you.",
-    "Welcome aboard! House rules: no seatbelt jokes, the airbags are decorative.",
-    "Glad you're here. If I yell GUN, it's probably my coffee. Probably.",
-    "Ride-along waiver? Signed it for you. In crayon. You're covered. Maybe.",
-    "Sit tight. Today's itinerary: a chase, a misunderstanding, and great snacks.",
-    "Touch the radio and you walk home. Touch the siren and you're hired.",
-    "Strap in. We do everything by the book - we just haven't read the book.",
-    "Good to have you! If things get loud, that's just community outreach.",
-    "Climb in. I haven't lost a ride-along yet. The paperwork would be brutal.",
-    "Welcome aboard. Remember: everything I do today is, technically, legal-ish."
+    "Welcome aboard, deputy! As of right now you're one of us. Legally? Don't worry about it.",
+    "Climb in! Anything you do today is officially departmental procedure.",
+    "Good to have you, partner. Whatever happens out there, it was justified.",
+    "Welcome to the brotherhood! Your immunity paperwork is verbal. It's verbal.",
+    "Buckle up, partner. You're covered by the same magic force field we are.",
+    "You ride with us, you're family. Family with plausible deniability.",
+    "Welcome aboard! Rule one: we protect our own. That's you now. Congrats.",
+    "New partner, huh? Here's your imaginary badge. Works exactly like a real one.",
+    "Glad you're here, deputy. Whatever you see today, you also didn't see.",
+    "Hop in! By riding with us you are now, legally, an ongoing investigation."
 )
 $pit = @(
     "Requesting permission to PIT, ah, who am I kidding.",
@@ -161,6 +163,16 @@ $settlement = @(
     "Thoughts, prayers, and a non-disclosure agreement.",
     "Don't worry, the pension is safe."
 )
+# The driver covering for the ride-along player who hurt a civilian.
+# Keep in sync with CoverUp[] in RideAlong.cs.
+$cover = @(
+    "I saw the whole thing. The civilian assaulted your bullet.",
+    "He was charging you. From behind. While fleeing. Textbook.",
+    "Relax, deputy. That's exactly what the settlement fund is for.",
+    "Nice grouping! I'll put resisting in the report.",
+    "Whoa there! Eh, he probably had warrants. Carry on.",
+    "Don't sweat it. You're one of us. That never happened."
+)
 # Keep in sync with IaVerdicts[] in QualifiedImmunity.cs.
 $ia = @(
     "Investigation complete. The officer acted within policy. Elapsed time: six seconds.",
@@ -179,6 +191,7 @@ for ($i = 0; $i -lt $collateral_q.Length; $i++) { Make-Clip $collateral_q[$i] (J
 for ($i = 0; $i -lt $collateral_a.Length; $i++) { Make-Clip $collateral_a[$i] (Join-Path $dir "collateral_a_$i.wav") }
 for ($i = 0; $i -lt $settlement.Length; $i++) { Make-Clip $settlement[$i] (Join-Path $dir "settlement_$i.wav") }
 for ($i = 0; $i -lt $ia.Length; $i++) { Make-Clip $ia[$i] (Join-Path $dir "ia_$i.wav") }
+for ($i = 0; $i -lt $cover.Length; $i++) { Make-Clip $cover[$i] (Join-Path $dir "cover_$i.wav") }
 
-Write-Output ("Generated {0} clips into {1}" -f ($radio.Length + $taunt.Length + $welcome.Length + $pit.Length + $collateral_q.Length + $collateral_a.Length + $settlement.Length + $ia.Length), $dir)
+Write-Output ("Generated {0} clips into {1}" -f ($radio.Length + $taunt.Length + $welcome.Length + $pit.Length + $collateral_q.Length + $collateral_a.Length + $settlement.Length + $ia.Length + $cover.Length), $dir)
 
