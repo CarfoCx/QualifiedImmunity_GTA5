@@ -186,6 +186,8 @@ namespace QualifiedImmunity
             }
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
             {
+                // Same whole-crew rule as Regroup: never leave the partner behind.
+                if (Valid(_partner) && !_partner.IsInVehicle(_copCar)) return;
                 Notify("~g~Officer:~w~ Scene's clear. Back on patrol.");
                 ResumePatrol();
             }
@@ -235,8 +237,12 @@ namespace QualifiedImmunity
             }
 
             // Player chose to stay aboard and a driver is ready -> resume patrol.
+            // Wait for the WHOLE crew: driving off while the partner was still
+            // walking back stranded him at the scene (the 18s warp fallback above
+            // bounds how long this can hold things up).
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
             {
+                if (Valid(_partner) && !_partner.IsInVehicle(_copCar)) return;
                 Notify("~g~Back on patrol.");
                 ResumePatrol();
             }

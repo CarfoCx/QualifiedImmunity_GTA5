@@ -24,6 +24,14 @@ namespace QualifiedImmunity
             if (target == null) return false;   // no traffic to designate -> keep cruising
             _suspectCar = target;
 
+            // Pin the designated car (and its crew, in DesignateSuspects) as mission
+            // entities for the length of the pursuit. These are AMBIENT entities --
+            // without the pin, the engine's population manager could cull them the
+            // moment they drifted out of streaming focus, which ended the pursuit one
+            // breath after the siren flipped on ("sirens flash, instant suspect-down").
+            // Released via MarkAsNoLongerNeeded in DespawnPursuitProps/Cleanup.
+            Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _suspectCar, true, true);
+
             // Variety: Configurable innocent chance vs armed.
             _suspectsInnocent = _rng.Next(100) < _innocentChance;
             if (_suspectsInnocent)
@@ -108,6 +116,7 @@ namespace QualifiedImmunity
                 if (!Valid(ped) || IsCopPed(ped) || ped == player) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(ped.Handle)) continue;
                 SetupSuspectPed(ped, threat);                 // sets _suspGroup -> cops go hostile
+                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, ped, true, true); // don't cull mid-chase
                 Function.Call(Hash.SET_PED_KEEP_TASK, ped, true);
                 into.Add(ped);
             }
@@ -122,6 +131,7 @@ namespace QualifiedImmunity
             if (v2 == null) return;     // no second vehicle around -> no backup crew
 
             _suspectCar2 = v2;
+            Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _suspectCar2, true, true); // don't cull mid-chase
             DesignateSuspects(_suspectCar2, 3, _suspectPeds);   // counted as suspects -> fight ends when ALL are down
             Ped d2 = _suspectCar2.Driver;
             if (Valid(d2))
@@ -447,6 +457,113 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, shooter, 2, true);                  // CanDoDrivebys
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, shooter, CA_CanLeaveVehicle, false); // ...but don't bail out of the car
             Function.Call(Hash.TASK_DRIVE_BY, shooter, target, 0, 0f, 0f, 0f, 50f, 100, true, unchecked((int)0xC6EE6B4C));
+        }
+
+        // -------------------------------------------------------------------
+        // Post-pursuit scene wrap-up: real officers don't shrug and drive off.
+        // The cruiser parks (lights stay on -- it's a scene now), one officer
+        // covers while the other approaches the downed suspect and works the
+        // body (cuff/inspect), the scene holds a beat, and only THEN does the
+        // unit regroup and roll out. Suspect bodies aren't despawned until
+        // Regroup, so BodyRecovery's ambulance often arrives mid-scene.
+        // -------------------------------------------------------------------
+        private void BeginWrapup()
+        {
+            _engaged = false;   // release the D-pad pursuit commands
+
+            // Find a body to work: prefer one on the ground over one still in a car.
+            _wrapBody = null;
+            foreach (Ped s in _suspectPeds)
+                if (s != null && s.Exists() && !s.IsInVehicle()) { _wrapBody = s; break; }
+            if (_wrapBody == null)
+                foreach (Ped s in _suspectPeds)
+                    if (s != null && s.Exists()) { _wrapBody = s; break; }
+
+            if (_wrapBody == null || (!Valid(_driver) && !Valid(_partner)))
+            {
+                EndSirens();
+                SetPhase(Phase.Regroup);
+                return;
+            }
+
+            // Park the cruiser at the scene; the lights stay on until Regroup.
+            if (Valid(_driver) && _driver.IsInVehicle(_copCar))
+                Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 5000);
+
+            _wrapStage = 0;
+            _wrapStageAt = DateTime.Now;
+            SetPhase(Phase.Wrapup);
+        }
+
+        private void HandleWrapup(Ped player)
+        {
+            if (_wrapBody == null || !_wrapBody.Exists()) { FinishWrapup(); return; }
+            Ped lead  = Valid(_partner) ? _partner : _driver;   // partner works the body...
+            Ped cover = (Valid(_partner) && Valid(_driver)) ? _driver : null; // ...driver covers
+            if (!Valid(lead)) { FinishWrapup(); return; }
+
+            double inStage = (DateTime.Now - _wrapStageAt).TotalSeconds;
+            switch (_wrapStage)
+            {
+                case 0: // dismount and approach; the cover officer holds an aim on the body
+                    PrepForScene(lead);
+                    Function.Call(Hash.TASK_GO_TO_ENTITY, lead, _wrapBody, -1, 1.6f, 1.6f, 1073741824.0f, 0);
+                    if (Valid(cover))
+                    {
+                        PrepForScene(cover);
+                        Function.Call(Hash.TASK_AIM_GUN_AT_ENTITY, cover, _wrapBody, -1, false);
+                    }
+                    Notify("~b~" + CopNames.For(lead) + ":~w~ Cover me. I'm gonna go 'check his pulse'.");
+                    _wrapStage = 1; _wrapStageAt = DateTime.Now;
+                    break;
+
+                case 1: // reached the body (or took too long) -> cuff/inspect beat
+                    if (lead.Position.DistanceTo(_wrapBody.Position) < 2.2f || inStage > 10)
+                    {
+                        if (!_wrapBody.IsDead)
+                        {
+                            Function.Call(Hash.TASK_ARREST_PED, lead, _wrapBody);
+                            Notify("~b~" + CopNames.For(lead) + ":~w~ You're under arrest for surviving!");
+                        }
+                        else
+                        {
+                            Function.Call(Hash.TASK_TURN_PED_TO_FACE_ENTITY, lead, _wrapBody, 1200);
+                            Function.Call(Hash.TASK_START_SCENARIO_IN_PLACE, lead,
+                                "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true);
+                            Notify("~b~" + CopNames.For(lead) + ":~w~ Yep. He's done resisting.");
+                        }
+                        _wrapStage = 2; _wrapStageAt = DateTime.Now;
+                    }
+                    break;
+
+                case 2: // hold the scene a beat, then wrap and regroup
+                    if (inStage > 9) FinishWrapup();
+                    break;
+            }
+
+            if (SecondsInPhase > 40) FinishWrapup();   // hard safety cap
+        }
+
+        // Take an officer off the driving/combat locks so the scene tasks apply:
+        // KEEP_TASK rejected new tasks, the event-block froze them on exit, and
+        // CanLeaveVehicle=false kept them pinned in the seat.
+        private void PrepForScene(Ped c)
+        {
+            if (!Valid(c)) return;
+            Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
+            Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, false);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, true);
+            Function.Call(Hash.CLEAR_PED_TASKS, c);
+        }
+
+        private void FinishWrapup()
+        {
+            _wrapBody = null;
+            // Drop the tend/aim tasks so the Regroup re-board tasks apply cleanly.
+            if (Valid(_driver)) Function.Call(Hash.CLEAR_PED_TASKS, _driver);
+            if (Valid(_partner)) Function.Call(Hash.CLEAR_PED_TASKS, _partner);
+            EndSirens();
+            SetPhase(Phase.Regroup);
         }
 
         // Drop the suspect + backup units but keep your unit intact.

@@ -11,7 +11,7 @@ namespace QualifiedImmunity
     // C# 5-compatible (in-box csc), API names verified against SHVDNE.
     public partial class RideAlong : Script
     {
-        private enum Phase { Idle, EnRoute, Boarding, Riding, Pursuit, Regroup, Assist, Clearing }
+        private enum Phase { Idle, EnRoute, Boarding, Riding, Pursuit, Wrapup, Regroup, Assist, Clearing }
 
         // ---- Keybinds (loaded from QualifiedImmunity.ini under [Keys]) ----
         private Keys _requestKey = Keys.F9;
@@ -137,6 +137,12 @@ namespace QualifiedImmunity
 
         // Escape resolution state (part 8)
         private DateTime _escapeTimerStarted = DateTime.MinValue;
+
+        // Post-pursuit scene wrap-up: the unit holds the scene, covers, and works
+        // the downed suspect instead of immediately driving off.
+        private Ped _wrapBody;                              // the downed suspect being worked
+        private int _wrapStage;                             // 0 approach, 1 cuff/inspect, 2 hold
+        private DateTime _wrapStageAt = DateTime.MinValue;
 
         // Message bodies only; the speaking officer's name is prepended at runtime.
         // Keep in sync (order + count) with $radio in tools/gen_audio.ps1.
@@ -522,6 +528,7 @@ namespace QualifiedImmunity
             DespawnPursuitProps();       // drop any suspect/backup tied to the lost unit
             _engaged = false; _pitting = false;
             _threat = null; _assistEngaged = false;
+            _wrapBody = null;
             SpawnUnit(player, true);
         }
 
@@ -737,7 +744,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.3:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.4:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1076,9 +1083,11 @@ namespace QualifiedImmunity
                             {
                                 Notify("~g~Dispatch:~w~ Suspect down. Now THAT'S community policing!");
                             }
-                            EndSirens();
                             StopNewsCam();   // pursuit's over -> don't leave the news cam stuck on a corpse
-                            SetPhase(Phase.Regroup);
+                            // Hold the scene like real officers (cover + work the body)
+                            // instead of shrugging and driving off; falls through to
+                            // Regroup when there's no body or no crew to do it.
+                            BeginWrapup();
                             return;
                         }
 
@@ -1107,6 +1116,10 @@ namespace QualifiedImmunity
                         PursuitTick();
                         break;
                     }
+
+                case Phase.Wrapup:
+                    HandleWrapup(player);
+                    break;
 
                 case Phase.Regroup:
                     HandleRegroup(player);
@@ -1514,6 +1527,7 @@ namespace QualifiedImmunity
             _suspect = null; _suspectCar = null; _suspectCar2 = null; _driver = null; _partner = null; _copCar = null;
             _engaged = false; _pitting = false;
             _threat = null; _assistEngaged = false;
+            _wrapBody = null;
             SetPhase(Phase.Idle);
         }
 
