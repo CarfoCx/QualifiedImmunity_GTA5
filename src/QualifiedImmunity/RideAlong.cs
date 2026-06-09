@@ -699,7 +699,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.0:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.1:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1036,44 +1036,63 @@ namespace QualifiedImmunity
             }
         }
 
+        // A nearby officer actively in a fight, EXCLUDING our own crew (driver, partner,
+        // backup, heli). Note: this deliberately does NOT skip the whole FriendlyCops
+        // registry -- AmbientPolice's staged officers live there too, and skipping them
+        // made every real staged gunfight invisible to the assist scanner. The only
+        // engagements it could find were momentary gang-AI executions, which were over
+        // before the unit arrived ("rolling in!" -> instant "threat clear").
         private Ped FindNearbyEngagedCop(float radius)
         {
             if (!Valid(_copCar)) return null;
             foreach (Ped cop in WorldCache.GetNearbyPeds(_copCar.Position, radius))
             {
                 if (!IsCopPed(cop) || cop.IsDead) continue;
-                if (RideAlongRegistry.FriendlyCops.Contains(cop.Handle)) continue;
+                if (IsOwnUnit(cop)) continue;
                 if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, cop, 0)) return cop;
             }
             return null;
+        }
+
+        // One of the ride-along's own peds: the unit, its backup waves, or the heli crew.
+        private bool IsOwnUnit(Ped p)
+        {
+            if (p == null || !p.Exists()) return false;
+            int h = p.Handle;
+            if (Valid(_driver) && _driver.Handle == h) return true;
+            if (Valid(_partner) && _partner.Handle == h) return true;
+            if (_heliPilot != null && _heliPilot.Exists() && _heliPilot.Handle == h) return true;
+            if (_heliGunner != null && _heliGunner.Exists() && _heliGunner.Handle == h) return true;
+            foreach (Entity ent in _backupEntities)
+            {
+                Ped bp = ent as Ped;
+                if (bp != null && bp.Exists() && bp.Handle == h) return true;
+            }
+            return false;
         }
 
         private Ped GetCombatThreat(Ped engagedCop)
         {
             if (!Valid(engagedCop)) return null;
             Ped player = Game.Player.Character;
-            // Two-pass in one loop: track the NEAREST actively-fighting ped
-            // (preferred) and the nearest non-combat ped as a fallback. The old
-            // code returned the FIRST combat ped it encountered regardless of
-            // distance, which could hand the unit a far-away target and leave a
-            // closer threat ignored.
-            Ped bestCombat    = null;
-            Ped bestNonCombat = null;
-            float bestCombatD    = float.MaxValue;
-            float bestNonCombatD = 55f;
+            // ONLY a ped that is actually FIGHTING qualifies as a threat. The old
+            // nearest-non-combat fallback handed the unit whoever happened to be
+            // standing (or dying) closest to the shooter -- usually the gang-AI cop's
+            // own execution victim, who was dead a beat later. That's what produced
+            // "backing them up!" followed instantly by "threat is clear": the unit
+            // was dispatched at a corpse-to-be, not a combatant.
+            Ped best = null;
+            float bestD = float.MaxValue;
             foreach (Ped p in WorldCache.GetNearbyPeds(engagedCop.Position, 55f))
             {
                 if (p == null || !p.Exists() || p.IsDead) continue;
                 if (IsCopPed(p) || p == player) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(p.Handle)) continue;
+                if (!Function.Call<bool>(Hash.IS_PED_IN_COMBAT, p, 0)) continue;
                 float d = p.Position.DistanceTo(engagedCop.Position);
-                if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, p, 0))
-                {
-                    if (d < bestCombatD) { bestCombatD = d; bestCombat = p; }
-                }
-                else if (d < bestNonCombatD) { bestNonCombatD = d; bestNonCombat = p; }
+                if (d < bestD) { bestD = d; best = p; }
             }
-            return bestCombat ?? bestNonCombat;
+            return best;
         }
 
         private Ped AliveSuspect()

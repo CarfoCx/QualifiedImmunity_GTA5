@@ -116,10 +116,24 @@ namespace QualifiedImmunity
         }
 
         // Engagement's over -> hold position and "confirm" the scene for 5-10s.
+        // Only if WE actually fought, though: if the threat died before the unit
+        // ever engaged, announcing "confirming the threat is clear" two seconds
+        // after "rolling in to back them up!" read as a bug. In that case the
+        // unit just shrugs and goes back to patrol.
         private void BeginClearing()
         {
+            bool fought = _assistEngaged;
             _threat = null;
             _assistEngaged = false;
+
+            if (!fought)
+            {
+                string who = Valid(_driver) ? CopNames.For(_driver) : "Officer";
+                Notify("~y~" + who + ":~w~ Locals finished it before we got there. Glory hogs.");
+                ResumePatrol();
+                return;
+            }
+
             _clearDelay = 5.0 + _rng.NextDouble() * 5.0;   // 5-10s
             EndSirens();
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
