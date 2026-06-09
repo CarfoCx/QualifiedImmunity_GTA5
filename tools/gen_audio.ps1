@@ -146,7 +146,29 @@ $collateral_a = @(
     "Eggs, omelettes, you know the saying. Totally worth it!",
     "They go in the report as scenery. Worth every penny.",
     "Acceptable losses! The suspect matters WAY more. Worth it!",
-    "Statistics need data points. Worth it. NEXT!"
+    "Suspect deliberately pushed a civilian into our path! Not our fault!",
+    "Be advised, suspect just used a civilian as a human shield!",
+    "Civilian was interfering with an active pursuit! Pushing through!"
+)
+# Keep in sync with SettlementQuips[] in QualifiedImmunity.cs.
+$settlement = @(
+    "Your taxes at work!",
+    "Still cheaper than retraining!",
+    "The officer has been placed on PAID leave.",
+    "No wrongdoing was found. It never is.",
+    "The city disputes the family's account.",
+    "Budget line item: oopsies.",
+    "Thoughts, prayers, and a non-disclosure agreement.",
+    "Don't worry, the pension is safe."
+)
+# Keep in sync with IaVerdicts[] in QualifiedImmunity.cs.
+$ia = @(
+    "Investigation complete. The officer acted within policy. Elapsed time: six seconds.",
+    "We have reviewed the footage. There is no footage.",
+    "After carefully reading the officer's own statement, the officer is cleared.",
+    "The deceased had a record: jaywalking, twenty fourteen. Use of force justified.",
+    "Finding: the bullets acted independently of the officer.",
+    "Case closed. The officer has been nominated for Employee of the Month."
 )
 
 for ($i = 0; $i -lt $radio.Length; $i++) { Make-Clip $radio[$i] (Join-Path $dir "radio_$i.wav") }
@@ -155,6 +177,8 @@ for ($i = 0; $i -lt $welcome.Length; $i++) { Make-Clip $welcome[$i] (Join-Path $
 for ($i = 0; $i -lt $pit.Length; $i++) { Make-Clip $pit[$i] (Join-Path $dir "pit_$i.wav") }
 for ($i = 0; $i -lt $collateral_q.Length; $i++) { Make-Clip $collateral_q[$i] (Join-Path $dir "collateral_q_$i.wav") }
 for ($i = 0; $i -lt $collateral_a.Length; $i++) { Make-Clip $collateral_a[$i] (Join-Path $dir "collateral_a_$i.wav") }
+for ($i = 0; $i -lt $settlement.Length; $i++) { Make-Clip $settlement[$i] (Join-Path $dir "settlement_$i.wav") }
+for ($i = 0; $i -lt $ia.Length; $i++) { Make-Clip $ia[$i] (Join-Path $dir "ia_$i.wav") }
 
-Write-Output ("Generated {0} clips into {1}" -f ($radio.Length + $taunt.Length + $welcome.Length + $pit.Length + $collateral_q.Length + $collateral_a.Length), $dir)
+Write-Output ("Generated {0} clips into {1}" -f ($radio.Length + $taunt.Length + $welcome.Length + $pit.Length + $collateral_q.Length + $collateral_a.Length + $settlement.Length + $ia.Length), $dir)
 

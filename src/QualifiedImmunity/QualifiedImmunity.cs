@@ -82,6 +82,7 @@ namespace QualifiedImmunity
             "Administrative leave, here I come!"
         };
 
+        // Keep in sync (order + count) with $settlement in tools/gen_audio.ps1.
         private static readonly string[] SettlementQuips =
         {
             "Your taxes at work!",
@@ -94,6 +95,7 @@ namespace QualifiedImmunity
             "Don't worry, the pension is safe."
         };
 
+        // Keep in sync (order + count) with $ia in tools/gen_audio.ps1.
         private static readonly string[] IaVerdicts =
         {
             "Investigation complete. The officer acted within policy. (Elapsed: 6 seconds.)",
@@ -698,10 +700,11 @@ namespace QualifiedImmunity
                 if ((DateTime.Now - _lastSettlementTicker).TotalSeconds > 12)
                 {
                     _lastSettlementTicker = DateTime.Now;
+                    int quip = _rng.Next(SettlementQuips.Length);
+                    QIAudio.PlaySettlement(quip);
                     GTA.UI.Notification.PostTicker(string.Format(
                         "~g~CITY SETTLEMENT FUND:~w~ +${0:N0} -- ${1:N0} this shift ({2} payouts). {3}",
-                        payout, _settlementTotal, _settlementBodies,
-                        SettlementQuips[_rng.Next(SettlementQuips.Length)]), false);
+                        payout, _settlementTotal, _settlementBodies, SettlementQuips[quip]), false);
                 }
             }
 
@@ -737,8 +740,9 @@ namespace QualifiedImmunity
         {
             if (_iaVerdictDue == DateTime.MinValue || DateTime.Now < _iaVerdictDue) return;
             _iaVerdictDue = DateTime.MinValue;
-            GTA.UI.Notification.PostTicker(
-                "~b~Internal Affairs:~w~ " + IaVerdicts[_rng.Next(IaVerdicts.Length)], false);
+            int i = _rng.Next(IaVerdicts.Length);
+            QIAudio.PlayIaVerdict(i);
+            GTA.UI.Notification.PostTicker("~b~Internal Affairs:~w~ " + IaVerdicts[i], false);
         }
 
         // Drop set entries whose entity no longer exists (corpses can despawn/be hauled off).

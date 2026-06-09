@@ -699,7 +699,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.0:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1786,6 +1786,8 @@ namespace QualifiedImmunity
         public static void PlayPit(int i) { Play("pit_" + i + ".wav"); }
         public static void PlayCollateralQ(int i) { Play("collateral_q_" + i + ".wav"); }
         public static void PlayCollateralA(int i) { Play("collateral_a_" + i + ".wav"); }
+        public static void PlaySettlement(int i) { Play("settlement_" + i + ".wav"); }
+        public static void PlayIaVerdict(int i) { Play("ia_" + i + ".wav"); }
 
         private static void Play(string file)
         {
