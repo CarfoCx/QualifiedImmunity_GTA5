@@ -132,6 +132,7 @@ namespace QualifiedImmunity
         private DateTime _boardTaskAt = DateTime.MinValue;     // when the walk-in was issued (for fallback)
         private DateTime _lastWander = DateTime.MinValue;      // throttle re-issuing the patrol wander
         private DateTime _lastCarMoving = DateTime.MinValue;   // last time the cruiser was actually moving
+        private bool _pullingOver;                             // close to the player -> curb pull-over issued
 
         // Escape resolution state (part 8)
         private DateTime _escapeTimerStarted = DateTime.MinValue;
@@ -518,7 +519,11 @@ namespace QualifiedImmunity
             { RideAlongRegistry.FriendlyCops.Remove(_driver.Handle); CopNames.Forget(_driver.Handle); _driver.MarkAsNoLongerNeeded(); }
             if (_partner != null && _partner.Exists())
             { RideAlongRegistry.FriendlyCops.Remove(_partner.Handle); CopNames.Forget(_partner.Handle); _partner.MarkAsNoLongerNeeded(); }
-            if (_copCar != null && _copCar.Exists()) _copCar.MarkAsNoLongerNeeded();
+            if (_copCar != null && _copCar.Exists())
+            {
+                Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, 0, 0); // release the seat claim
+                _copCar.MarkAsNoLongerNeeded();
+            }
             _driver = null; _partner = null; _copCar = null;
         }
 
@@ -558,6 +563,13 @@ namespace QualifiedImmunity
             // (LockIntoCar pins them in), so we DON'T lock the passenger door anymore: that
             // was blocking the player from getting back in after stepping out mid-ride.
             LockCarForRide();
+
+            // The driver SEAT belongs to the AI, full stop -- the same mechanism taxis
+            // use. Without it, the game's "enter nearest door" default dropped the player
+            // into the EMPTY driver seat after a firefight (while the cop was still
+            // walking back), with no way to move to a passenger seat afterwards. With an
+            // exclusive driver set, entering routes the player to the open seats instead.
+            if (Valid(_driver)) Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, _driver, 0);
 
             // Blip the cruiser so the player can watch it drive in and find it later.
             _copBlip = _copCar.AddBlip();
@@ -633,6 +645,7 @@ namespace QualifiedImmunity
             _boardTaskIssued = false;
             _lastEnRouteDist = float.MaxValue;
             _lastCarMoving = DateTime.Now;
+            _pullingOver = false;
             SetPhase(Phase.EnRoute);
         }
 
@@ -687,8 +700,17 @@ namespace QualifiedImmunity
                 Function.Call(Hash.TASK_VEHICLE_MISSION_PED_TARGET, _driver, _copCar, player,
                     4, 16.0f, DRIVE_STYLE, 2.0f, 5.0f, false); // 4 == MISSION_GOTO; small stop range -> pulls right up
             else
+            {
+                // Aim for the ROAD beside the player, not their exact coordinate. The
+                // player is usually standing on a sidewalk/plaza; navigating at that raw
+                // spot is what made the AI mount the curb at pedestrians on the way in
+                // (mass panic) instead of arriving like a taxi. The curb-side pull-over
+                // for the last stretch is handled in the EnRoute phase.
+                Vector3 dest = SnapToRoad(player.Position);
+                if (dest == Vector3.Zero || dest.DistanceTo(player.Position) > 40f) dest = player.Position;
                 Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
-                    player.Position.X, player.Position.Y, player.Position.Z, 16.0f, DRIVE_STYLE, 2.0f); // 2m stop range
+                    dest.X, dest.Y, dest.Z, 16.0f, DRIVE_STYLE, 2.0f); // 2m stop range
+            }
         }
 
         private bool _announcedLoad;
@@ -699,7 +721,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.1:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.2:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -818,16 +840,47 @@ namespace QualifiedImmunity
                             { _driveMethod = 2; _lastReissue = DateTime.MinValue; }
                         }
 
+                        // Taxi-style arrival: once the cruiser is close and rolling, stop
+                        // navigating at the player and PULL OVER at the curb beside them
+                        // (TASK_VEHICLE_PARK mode 3 -- the same pull-over taxis use). This
+                        // is what gives the clean "rolls up and stops at the curb" arrival
+                        // instead of the AI nosing onto the sidewalk after its destination.
+                        if (!_pullingOver && _everMoved && dist < 32f)
+                        {
+                            OutputArgument on = new OutputArgument(), oh = new OutputArgument();
+                            if (Function.Call<bool>(Hash.GET_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                                player.Position.X, player.Position.Y, player.Position.Z, on, oh, 1, 3.0f, 0f))
+                            {
+                                Vector3 node = on.GetResult<Vector3>();
+                                if (node.DistanceTo(player.Position) < 28f)
+                                {
+                                    _pullingOver = true;
+                                    Function.Call(Hash.TASK_VEHICLE_PARK, _driver, _copCar,
+                                        node.X, node.Y, node.Z, oh.GetResult<float>(),
+                                        3 /* pull over at the curb */, 20.0f, true);
+                                }
+                            }
+                        }
+                        // Pull-over wedged short of the player -> drop back to the normal
+                        // approach so the unit doesn't idle 20m+ away forever.
+                        else if (_pullingOver && dist >= 22f && CarStalled())
+                        {
+                            _pullingOver = false;
+                            _lastReissue = DateTime.MinValue;
+                        }
+
                         // HANDS-OFF re-issue: issue once, then refresh only every 10s. Re-
                         // tasking too often restarts the drive before the car can accelerate
                         // (it never gets off 0.0). Leave the task alone so it can actually run.
+                        // While the curb pull-over is in progress the drive task is NOT
+                        // refreshed -- a re-issued drive would cancel the park maneuver.
                         bool isFirstIssue = (_lastReissue == DateTime.MinValue);
                         double sinceReissue = (DateTime.Now - _lastReissue).TotalSeconds;
                         // Keep refreshing the destination until it's right on top of the player,
                         // and refresh FASTER once it's close so it noses all the way up instead
                         // of coasting to a stop a few meters short and making you walk.
                         double reissueGap = dist < 35f ? 3.5 : 10.0;
-                        if (dist >= 6f && (isFirstIssue || sinceReissue > reissueGap))
+                        if (!_pullingOver && dist >= 6f && (isFirstIssue || sinceReissue > reissueGap))
                         {
                             _lastReissue = DateTime.Now;
                             IssueEnRouteDrive(player, isFirstIssue);
@@ -835,14 +888,16 @@ namespace QualifiedImmunity
 
                         // Arrival, in priority order:
                         //  - pulledUp : it got right next to you (the normal, desired case).
+                        //  - parked   : the curb pull-over finished within hailing distance.
                         //  - stuckClose: stopped within 16m and can't improve for 9s -- accept it.
                         //  - bestEffort: genuinely can't path any closer (you're off the road
                         //    network), so after 12s stalled it stops as close as it can and you
                         //    cover the last few steps -- rather than failing the whole call.
                         bool pulledUp   = dist < 8f;
+                        bool parked     = _pullingOver && _copCar.Speed < 0.6f && dist < 22f;
                         bool stuckClose = _copCar.Speed < 1f && dist < 16f && (DateTime.Now - _lastProgress).TotalSeconds > 9;
                         bool bestEffort = _copCar.Speed < 1f && dist < 45f && (DateTime.Now - _lastProgress).TotalSeconds > 12;
-                        if (pulledUp || stuckClose || bestEffort)
+                        if (pulledUp || parked || stuckClose || bestEffort)
                         {
                             // Release the KEEP_TASK lock from the en-route drive so the
                             // upcoming boarding/patrol tasks apply cleanly (the car is now
@@ -854,7 +909,7 @@ namespace QualifiedImmunity
 
                             Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
                             _copCar.IsSirenActive = false;
-                            Notify(pulledUp || stuckClose
+                            Notify(pulledUp || parked || stuckClose
                                 ? "~g~Dispatch:~w~ Your ride-along has ARRIVED - get in (" + SeatName(_playerSeat) + ")."
                                 : "~g~Dispatch:~w~ Unit's as close as it can get - walk over and get in (" + SeatName(_playerSeat) + ").");
                             _lastReboardPrompt = DateTime.MinValue;
@@ -1115,8 +1170,12 @@ namespace QualifiedImmunity
 
         private void EnsureDriverSeated()
         {
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar))
-                Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
+            if (!Valid(_driver) || _driver.IsInVehicle(_copCar)) return;
+            // Never warp the cop onto a player who grabbed the wheel (legacy edge --
+            // exclusive-driver normally prevents the player from being there at all).
+            Ped seated = Function.Call<Ped>(Hash.GET_PED_IN_VEHICLE_SEAT, _copCar, -1);
+            if (seated != null && seated.Exists() && seated == Game.Player.Character) return;
+            Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
         }
 
         // Keep the cruiser open for the player (passenger + rear seats) while reserving the
@@ -1144,10 +1203,13 @@ namespace QualifiedImmunity
                 _driver = _partner;
                 _partner = null;
                 MakeRideAlongDriver(_driver);
-                // Unlock front right passenger door now that it's vacant
                 if (Valid(_copCar))
                 {
+                    // Unlock front right passenger door now that it's vacant
                     Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 1, 1); // Front Right (Passenger) Unlocked
+                    // Re-point the exclusive-driver slot at the promoted officer so the
+                    // player still can't end up behind the wheel.
+                    Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, _driver, 0);
                 }
             }
         }
@@ -1411,7 +1473,11 @@ namespace QualifiedImmunity
             _copBlip = null;
             if (Valid(_driver)) { CopNames.Forget(_driver.Handle); _driver.MarkAsNoLongerNeeded(); }
             if (Valid(_partner)) { CopNames.Forget(_partner.Handle); _partner.MarkAsNoLongerNeeded(); }
-            if (Valid(_copCar)) _copCar.MarkAsNoLongerNeeded();
+            if (Valid(_copCar))
+            {
+                Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, 0, 0); // release the seat claim
+                _copCar.MarkAsNoLongerNeeded();
+            }
             _suspect = null; _suspectCar = null; _suspectCar2 = null; _driver = null; _partner = null; _copCar = null;
             _engaged = false; _pitting = false;
             _threat = null; _assistEngaged = false;
