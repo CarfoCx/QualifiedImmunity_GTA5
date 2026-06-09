@@ -49,6 +49,39 @@ namespace QualifiedImmunity
         private readonly Dictionary<int, DateTime> _threats = new Dictionary<int, DateTime>();
         private DateTime _lastEnforce = DateTime.MinValue;  // throttle for re-siccing threats
 
+        // ---- Panic traffic ---------------------------------------------------
+        // Civilian drivers near a shooting cop: most pull to the curb and stay in
+        // the car (realistic), some bail and flee screaming, and rarely one
+        // panics, floors it, and rams either the COP (instant chaos) or the
+        // SUSPECT (the officers love it).
+        private readonly HashSet<int> _panicHandled = new HashSet<int>();
+        private Ped _panicRammer;
+        private Ped _panicRamTarget;
+        private bool _panicRamTargetIsCop;
+        private DateTime _panicRamUntil = DateTime.MinValue;
+
+        // ---- Witness mode ---------------------------------------------------
+        // Outside the ride-along, ambient cops are SOMEWHAT less unhinged (scaled
+        // by AmbientChaosScale) but still commit crimes in front of you, without
+        // consequence. You can record an incident on your phone, then submit it:
+        // to the LSPD tip line (ignored, creatively) or to Weazel News (gains
+        // traction with every clip).
+        private bool _witnessEnabled = true;
+        private float _ambientChaosScale = 0.6f;
+        private Keys _recordKey = Keys.N;
+        private Keys _submitPoliceKey = Keys.J;
+        private Keys _submitMediaKey = Keys.K;
+        private DateTime _copCrimeAt = DateTime.MinValue;   // active recordable incident
+        private string _copCrimeDesc = "";
+        private DateTime _recordingUntil = DateTime.MinValue;
+        private int _footage;                                // unsent clips
+        private int _mediaTraction;                          // how big the story has grown
+        private DateTime _lastWitnessHelp = DateTime.MinValue;
+        private DateTime _pendingSubmitAt = DateTime.MinValue;
+        private string _pendingSubmitResult;
+        private bool _pendingSubmitQueuesIa;
+        private const double CrimeWindowSeconds = 15.0;
+
         // ---- Internal Affairs gag ------------------------------------------
         // A few seconds after an execution, IA announces the investigation is
         // already complete. Queued so the punchline lands on a comedic delay.
@@ -110,13 +143,25 @@ namespace QualifiedImmunity
             _vehicleAssaultRadius         = s.GetValue("Assault", "ResponseRadius", _vehicleAssaultRadius);
             _vehicleThreatMemorySeconds   = s.GetValue("Assault", "ThreatMemorySeconds", _vehicleThreatMemorySeconds);
 
-            _provokeKey = s.GetValue("Keys", "ProvokeKey", _provokeKey);
+            _witnessEnabled    = s.GetValue("Witness", "Enabled", _witnessEnabled);
+            _ambientChaosScale = s.GetValue("Witness", "AmbientChaosScale", _ambientChaosScale);
+
+            _provokeKey      = s.GetValue("Keys", "ProvokeKey", _provokeKey);
+            _recordKey       = s.GetValue("Keys", "RecordCrimeKey", _recordKey);
+            _submitPoliceKey = s.GetValue("Keys", "SubmitPoliceKey", _submitPoliceKey);
+            _submitMediaKey  = s.GetValue("Keys", "SubmitMediaKey", _submitMediaKey);
         }
 
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyCode == _provokeKey)
                 ProvokeNearbyCops(60f);
+            else if (e.KeyCode == _recordKey)
+                TryStartRecording();
+            else if (e.KeyCode == _submitPoliceKey)
+                SubmitFootage(false);
+            else if (e.KeyCode == _submitMediaKey)
+                SubmitFootage(true);
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -176,6 +221,8 @@ namespace QualifiedImmunity
             }
 
             CivilianUnrest(player);
+            PanicRamWatch();
+            WitnessTick(player);
             IaVerdictTick();
             CleanupStaleHandles();
         }
@@ -310,7 +357,9 @@ namespace QualifiedImmunity
         private void MaybeCollateral(Ped cop, Ped player)
         {
             if (!_enableCivilianTargeting) return;
-            if (_rng.NextDouble() > _civilianCollateralChance) return;
+            // Ambient cops run at a scaled-down chaos level (the full-strength
+            // unhinged experience belongs to the ride-along).
+            if (_rng.NextDouble() > _civilianCollateralChance * _ambientChaosScale) return;
 
             // Pick a hapless nearby civilian and let the badge sort it out.
             foreach (Ped civ in WorldCache.GetNearbyPeds(cop.Position, 18f))
@@ -320,6 +369,7 @@ namespace QualifiedImmunity
                 {
                     cop.Task.ShootAt(civ, 1500);
                     Taunt(cop);
+                    MarkCopCrime(cop, "an officer shooting a bystander");
                     break;
                 }
             }
@@ -349,19 +399,22 @@ namespace QualifiedImmunity
                     // config exactly (the old code rolled twice, which silently
                     // diluted ExecuteSurrenderingChance to ~0.8x its value).
                     double roll = _rng.NextDouble();
-                    if (roll < _executeSurrenderingChance)
+                    double execChance = _executeSurrenderingChance * _ambientChaosScale; // ambient = toned down
+                    if (roll < execChance)
                     {
                         cop.Task.ShootAt(p, 800);
                         Taunt(cop);
                         QueueIaVerdict();
+                        MarkCopCrime(cop, "an officer executing a downed man");
                         break;
                     }
-                    else if (roll < _executeSurrenderingChance + 0.10) // taser-flavor slice
+                    else if (roll < execChance + 0.10) // taser-flavor slice
                     {
                         cop.Weapons.Give(WeaponHash.StunGun, 100, true, true);
                         cop.Task.ShootAt(p, 2000);
                         Function.Call(Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE, cop, "GENERIC_CURSE_MED", "SPEECH_PARAMS_FORCE_SHOUTED", 1);
                         GTA.UI.Notification.PostTicker("~b~" + CopNames.For(cop) + ":~w~ STOP RESISTING!", false);
+                        MarkCopCrime(cop, "an officer tasing a man who was already down");
                         break;
                     }
                 }
@@ -683,6 +736,8 @@ namespace QualifiedImmunity
             }
             if (shootingCop == null) return;
 
+            PanicTraffic(shootingCop);
+
             foreach (Ped civ in WorldCache.GetNearbyPeds(shootingCop.Position, 25f))
             {
                 if (civ.IsDead) continue;
@@ -697,6 +752,7 @@ namespace QualifiedImmunity
                     // Instantly trigger police response!
                     shootingCop.Task.ShootAt(civ, 3000);
                     Taunt(shootingCop);
+                    MarkCopCrime(shootingCop, "an officer shooting a man for filming");
                 }
                 else if (react < 27) // 12% chance to fight back
                 {
@@ -707,6 +763,121 @@ namespace QualifiedImmunity
                     Function.Call(Hash.TASK_COMBAT_PED, civ, shootingCop, 0, 16);
                 }
             }
+        }
+
+        // -------------------------------------------------------------------
+        // Witness mode: record cop crimes, submit to the police or the media
+        // -------------------------------------------------------------------
+        private static readonly string[] PoliceTipResponses =
+        {
+            "Thank you for your tip. After a thorough 0.4-second review: no violation occurred.",
+            "Received. Your footage has been forwarded to the officer it depicts. He says hi.",
+            "Our system accidentally deleted your attachment. Eight times. Please stop resending.",
+            "Investigation complete: the camera was resisting.",
+            "We take all complaints seriously. This one weighed almost nothing."
+        };
+
+        private static readonly string[] MediaTractionLines =
+        {
+            "'HERO COP OR BAD APPLE?' Your clip is trending -- 48K views and climbing.",
+            "2.1 MILLION views. The mayor is 'aware of the video' and also 'on vacation.'",
+            "NATIONAL story now. The chief has promised a full investigation.",
+            "The officer received six months PAID leave and a podcast deal. You did this!",
+            "A statue of the officer is being commissioned. Society has decided to move on."
+        };
+
+        // A cop just did something heinous near the player -> open the recording
+        // window (the player gets ~15s to pull out their phone and film it).
+        private void MarkCopCrime(Ped cop, string desc)
+        {
+            if (!_witnessEnabled) return;
+            Ped player = Game.Player.Character;
+            if (player == null || !player.Exists()) return;
+            if (cop == null || !cop.Exists() || cop.Position.DistanceTo(player.Position) > 50f) return;
+            _copCrimeAt = DateTime.Now;
+            _copCrimeDesc = desc;
+        }
+
+        private void TryStartRecording()
+        {
+            if (!_witnessEnabled) return;
+            if ((DateTime.Now - _copCrimeAt).TotalSeconds > CrimeWindowSeconds) return; // nothing to film
+            if (_recordingUntil != DateTime.MinValue) return;                          // already rolling
+            Ped player = Game.Player.Character;
+            if (player == null || !player.Exists() || player.IsDead) return;
+
+            Function.Call(Hash.TASK_USE_MOBILE_PHONE_TIMED, player, 6000);
+            _recordingUntil = DateTime.Now.AddSeconds(4.0);
+            GTA.UI.Notification.PostTicker("~y~* REC *~w~ Filming " + _copCrimeDesc + "...", false);
+        }
+
+        private void WitnessTick(Ped player)
+        {
+            if (!_witnessEnabled) return;
+
+            // Finish an in-progress recording.
+            if (_recordingUntil != DateTime.MinValue && DateTime.Now >= _recordingUntil)
+            {
+                _recordingUntil = DateTime.MinValue;
+                _copCrimeAt = DateTime.MinValue;
+                _footage++;
+                GTA.UI.Notification.PostTicker("~g~Footage saved~w~ (" + _footage + " clip" + (_footage == 1 ? "" : "s")
+                    + "). ~b~" + _submitPoliceKey + "~w~ = LSPD tip line   ~y~" + _submitMediaKey + "~w~ = Weazel News", false);
+            }
+
+            // Prompt while a recordable incident is live (and we're not filming yet).
+            if (_recordingUntil == DateTime.MinValue
+                && (DateTime.Now - _copCrimeAt).TotalSeconds <= CrimeWindowSeconds
+                && (DateTime.Now - _lastWitnessHelp).TotalSeconds > 4.0)
+            {
+                _lastWitnessHelp = DateTime.Now;
+                ShowHelpText("You just witnessed ~r~" + _copCrimeDesc + "~s~. Press ~b~"
+                    + _recordKey + "~s~ to record it on your phone.");
+            }
+
+            // Deliver a delayed submission response.
+            if (_pendingSubmitResult != null && DateTime.Now >= _pendingSubmitAt)
+            {
+                GTA.UI.Notification.PostTicker(_pendingSubmitResult, false);
+                if (_pendingSubmitQueuesIa) { _iaVerdictDue = DateTime.Now.AddSeconds(6.0); _lastIaVerdict = DateTime.Now; }
+                _pendingSubmitResult = null;
+                _pendingSubmitQueuesIa = false;
+            }
+        }
+
+        private void SubmitFootage(bool toMedia)
+        {
+            if (!_witnessEnabled) return;
+            if (_footage <= 0)
+            {
+                GTA.UI.Notification.PostTicker("~y~No footage to send.~w~ Film a cop crime first (you won't wait long).", false);
+                return;
+            }
+            _footage--;
+
+            if (!toMedia)
+            {
+                GTA.UI.Notification.PostTicker("~b~You:~w~ Clip sent to the LSPD tip line.", false);
+                _pendingSubmitResult = "~b~LSPD Tip Line:~w~ " + PoliceTipResponses[_rng.Next(PoliceTipResponses.Length)];
+                _pendingSubmitQueuesIa = false;
+            }
+            else
+            {
+                GTA.UI.Notification.PostTicker("~y~You:~w~ Clip sent to Weazel News.", false);
+                int idx = Math.Min(_mediaTraction, MediaTractionLines.Length - 1);
+                _mediaTraction++;
+                _pendingSubmitResult = "~y~Weazel News:~w~ " + MediaTractionLines[idx];
+                // The "full investigation" the chief promises wraps up in 6 seconds.
+                _pendingSubmitQueuesIa = (idx == 2);
+            }
+            _pendingSubmitAt = DateTime.Now.AddSeconds(4.0);
+        }
+
+        private static void ShowHelpText(string text)
+        {
+            Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_HELP, "STRING");
+            Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
+            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_HELP, 0, false, true, 4000);
         }
 
         // -------------------------------------------------------------------
@@ -728,6 +899,131 @@ namespace QualifiedImmunity
             int i = _rng.Next(IaVerdicts.Length);
             QIAudio.PlayIaVerdict(i);
             GTA.UI.Notification.PostTicker("~b~Internal Affairs:~w~ " + IaVerdicts[i], false);
+        }
+
+        // -------------------------------------------------------------------
+        // Panic traffic
+        // -------------------------------------------------------------------
+        private void PanicTraffic(Ped shootingCop)
+        {
+            foreach (Vehicle v in WorldCache.GetNearbyVehicles(shootingCop.Position, 38f))
+            {
+                if (v == null || !v.Exists() || Cops.IsPoliceVehicle(v)) continue;
+                Ped drv = v.Driver;
+                if (drv == null || !drv.Exists() || drv.IsDead) continue;
+                if (drv == Game.Player.Character || IsCop(drv)) continue;
+                if (RideAlongRegistry.FriendlyCops.Contains(drv.Handle)) continue;
+                if (_panicHandled.Contains(drv.Handle)) continue;
+                _panicHandled.Add(drv.Handle);
+
+                int roll = _rng.Next(100);
+                if (roll < 8 && _panicRammer == null)
+                {
+                    // THE PANIC FLOORER: mashes the gas at... someone. 50/50 the cop
+                    // (instant chaos -- the assault detectors take it from there) or
+                    // the suspect the cop is shooting at (the officers will love it).
+                    Ped suspect = FindCombatTargetNear(shootingCop);
+                    bool ramCop = suspect == null || _rng.Next(2) == 0;
+                    Ped target = ramCop ? shootingCop : suspect;
+                    Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, drv, true);
+                    Function.Call(Hash.SET_DRIVER_ABILITY, drv, 0.2f);       // panicked, not skilled
+                    Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, drv, 1.0f);
+                    Function.Call(Hash.TASK_VEHICLE_MISSION_PED_TARGET, drv, v, target,
+                        (int)VehicleMissionType.Ram, 35.0f, 786468, 0.0f, 0.0f, false);
+                    _panicRammer = drv;
+                    _panicRamTarget = target;
+                    _panicRamTargetIsCop = ramCop;
+                    _panicRamUntil = DateTime.Now.AddSeconds(8.0);
+                    GTA.UI.Notification.PostTicker("~y~A panicking driver just FLOORED it...", false);
+                }
+                else if (roll < 38)
+                {
+                    // Bail out and run, screaming.
+                    Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, drv, false);
+                    Function.Call(Hash.TASK_LEAVE_VEHICLE, drv, v, 256);   // hurried, door open
+                    Function.Call(Hash.TASK_SMART_FLEE_PED, drv, shootingCop, 150f, -1, false, false);
+                    Function.Call(Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE, drv,
+                        "GENERIC_FRIGHTENED_HIGH", "SPEECH_PARAMS_FORCE_SHOUTED", 1);
+                }
+                else
+                {
+                    // The realistic majority: pull to the curb, stop, and stay in the
+                    // car with their head down until it's over.
+                    Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, drv, true);
+                    OutputArgument on = new OutputArgument(), oh = new OutputArgument();
+                    Vector3 p = v.Position;
+                    if (Function.Call<bool>(Hash.GET_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                        p.X, p.Y, p.Z, on, oh, 1, 3.0f, 0f))
+                    {
+                        Vector3 node = on.GetResult<Vector3>();
+                        Function.Call(Hash.TASK_VEHICLE_PARK, drv, v,
+                            node.X, node.Y, node.Z, oh.GetResult<float>(), 3, 18.0f, false);
+                    }
+                    else
+                    {
+                        Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, drv, v, 1, 6000); // just brake
+                    }
+                }
+            }
+            if (_panicHandled.Count > 64) PruneDeadHandles(_panicHandled);
+        }
+
+        // Whoever the cop is currently fighting/shooting near them (the "suspect").
+        private Ped FindCombatTargetNear(Ped cop)
+        {
+            Ped player = Game.Player.Character;
+            foreach (Ped p in WorldCache.GetNearbyPeds(cop.Position, 25f))
+            {
+                if (p == null || !p.Exists() || p.IsDead || IsCop(p) || p == player) continue;
+                if (RideAlongRegistry.FriendlyCops.Contains(p.Handle)) continue;
+                if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, p, 0) || p.IsRagdoll) return p;
+            }
+            return null;
+        }
+
+        // Did the panic floorer actually hit anyone? Cop -> the assault machinery
+        // takes over (chaos). Suspect -> the badges celebrate.
+        private void PanicRamWatch()
+        {
+            if (_panicRammer == null) return;
+            if (!_panicRammer.Exists() || DateTime.Now > _panicRamUntil
+                || _panicRamTarget == null || !_panicRamTarget.Exists())
+            {
+                _panicRammer = null; _panicRamTarget = null;
+                return;
+            }
+
+            Vehicle v = _panicRammer.CurrentVehicle;
+            if (v == null || !v.Exists()) { _panicRammer = null; _panicRamTarget = null; return; }
+            if (!Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, _panicRamTarget, v, true)) return;
+
+            if (_panicRamTargetIsCop)
+            {
+                GTA.UI.Notification.PostTicker(
+                    "~r~The panicking driver hit an OFFICER. This just became a whole thing.", false);
+                // DetectOfficerAssaults flags the driver and the area converges.
+            }
+            else
+            {
+                GTA.UI.Notification.PostTicker(
+                    "~g~The panicking driver flattened the SUSPECT. The officers are high-fiving.", false);
+                Ped a = null, b = null;
+                foreach (Ped cop in WorldCache.GetNearbyPeds(_panicRamTarget.Position, 40f))
+                {
+                    if (!IsCop(cop) || cop.IsDead) continue;
+                    if (a == null) a = cop;
+                    else { b = cop; break; }
+                }
+                if (a != null)
+                {
+                    CopSpeak(a, "GENERIC_THANKS");
+                    GTA.UI.Notification.PostTicker("~b~" + CopNames.For(a) +
+                        ":~w~ CIVIC ASSIST! That's going on the highlight reel!", false);
+                }
+                if (b != null) CopSpeak(b, "GENERIC_HOWS_IT_GOING");
+            }
+            _panicRammer = null;
+            _panicRamTarget = null;
         }
 
         private void Taunt(Ped cop)

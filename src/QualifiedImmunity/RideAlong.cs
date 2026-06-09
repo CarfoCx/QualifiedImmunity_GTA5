@@ -16,6 +16,7 @@ namespace QualifiedImmunity
         // ---- Keybinds (loaded from QualifiedImmunity.ini under [Keys]) ----
         private Keys _requestKey = Keys.F9;
         private Keys _cancelKey  = Keys.F10;
+        private Keys _heliCamKey = Keys.H;   // toggle the AIR-1 sensor feed
 
         // ---- Config constants (loaded from QualifiedImmunity.ini under [Pursuit]) ----
         private int _innocentChance = 35;
@@ -330,6 +331,7 @@ namespace QualifiedImmunity
             // Keys
             _requestKey = s.GetValue("Keys", "RequestRideAlongKey", _requestKey);
             _cancelKey  = s.GetValue("Keys", "CancelRideAlongKey", _cancelKey);
+            _heliCamKey = s.GetValue("Keys", "HeliCamKey", _heliCamKey);
 
             // RideAlong options
             _enableTourniquet = s.GetValue("RideAlong", "EnableTourniquet", _enableTourniquet);
@@ -380,6 +382,13 @@ namespace QualifiedImmunity
                 return;
             }
             if (e.KeyCode == _cancelKey && _phase != Phase.Idle) { Notify("~y~Ride-along ended."); Cleanup(); }
+            if (e.KeyCode == _heliCamKey)
+            {
+                // Close any time the feed is up (incl. the post-pursuit wind-down);
+                // open only during an active pursuit.
+                if (_newsCam != null) ToggleNewsChopperCamera();
+                else if (_phase == Phase.Pursuit || _engaged) ToggleNewsChopperCamera();
+            }
         }
 
         private void PollController()
@@ -836,7 +845,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.6:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -912,7 +921,10 @@ namespace QualifiedImmunity
             BanterTick();         // partner small talk: compliments + suspect slander
             DrawUnitHud();        // officer HP/XP bars + cruiser health
 
-            if (_phase == Phase.Pursuit) DrawHUD();
+            // The AIR-1 feed renders in ANY phase once it's up -- including the
+            // post-pursuit wind-down -- until the player closes it themselves.
+            if (_newsCam != null) HeliFeedTick();
+            else if (_phase == Phase.Pursuit) DrawHUD();
             DrawDebug();
 
             // Track whether the cruiser is actually moving, so drive/chase tasks are
@@ -1211,7 +1223,10 @@ namespace QualifiedImmunity
                             {
                                 Notify("~g~Dispatch:~w~ Suspect down. Now THAT'S community policing!");
                             }
-                            StopNewsCam();   // pursuit's over -> don't leave the news cam stuck on a corpse
+                            // Don't yank the player out of the heli view: the feed winds
+                            // down with a "press X to return" prompt while AIR-1 leaves,
+                            // and the camera watches the officers work the scene below.
+                            BeginHeliFeedWindDown();
                             // Hold the scene like real officers (cover + work the body)
                             // instead of shrugging and driving off; falls through to
                             // Regroup when there's no body or no crew to do it.
@@ -1231,7 +1246,7 @@ namespace QualifiedImmunity
                             {
                                 Notify("~y~Dispatch:~w~ Suspect got away! Call off the pursuit.");
                                 EndSirens();
-                                StopNewsCam();   // pursuit's over -> tear the news cam down
+                                BeginHeliFeedWindDown();   // feed stays up until the player exits
                                 SetPhase(Phase.Regroup);
                                 return;
                             }
@@ -1919,75 +1934,36 @@ namespace QualifiedImmunity
                 return;
             }
 
+            // The ONLY pursuit overlay: the AIR-1 feed prompt. No threat/backup/
+            // timer/command spam -- the chase tells its own story.
             if (_phase == Phase.Pursuit || _engaged)
             {
-                var time = DateTime.Now - _lastPursuitStart;
-                string threatLevelStr = _suspectThreat == 0 ? "LOW (Innocent)" : _suspectThreat == 1 ? "MEDIUM" : _suspectThreat == 2 ? "HIGH (Armor)" : "CRITICAL (SWAT)";
-                new GTA.UI.TextElement(string.Format("THREAT: {0}", threatLevelStr), new System.Drawing.PointF(10f, 10f), 0.45f, System.Drawing.Color.Red).Draw();
-                new GTA.UI.TextElement(string.Format("BACKUP UNITS: {0}", _backupCount), new System.Drawing.PointF(10f, 30f), 0.45f, System.Drawing.Color.White).Draw();
-                new GTA.UI.TextElement(string.Format("PURSUIT TIME: {0:D2}:{1:D2}", time.Minutes, time.Seconds), new System.Drawing.PointF(10f, 50f), 0.45f, System.Drawing.Color.Yellow).Draw();
-                new GTA.UI.TextElement("COMMANDS: UP (Ram), DOWN (Back Off), RIGHT (Drive-by), LEFT (Heli Cam)", new System.Drawing.PointF(10f, 70f), 0.35f, System.Drawing.Color.LightGray).Draw();
+                DrawMenuText("AIR-1 FEED AVAILABLE - press " + _heliCamKey + " or D-pad LEFT to patch in",
+                    0.5f, 0.925f, 0.31f, 4, 150, 205, 245, true);
             }
         }
 
         private DateTime _lastPursuitStart = DateTime.Now;
 
+        // The heli feed is the ONE pursuit command (the old ram/back-off/drive-by
+        // D-pad options are gone per design). D-pad Left or the keyboard key
+        // toggles the feed; while it's up, the D-pad drives the CAMERA:
+        // Up/Down = optical zoom, Right = cycle EO / night-vision / thermal IR.
         private void CheckCommands()
         {
             if (_phase != Phase.Pursuit && !_engaged) return;
             if (Game.Player.Character == null || !Game.Player.Character.IsInVehicle(_copCar)) return;
-            // Dispatch phone is up -> it owns the D-pad (menu nav). Don't also ram/zoom/toggle
-            // the cam off the same presses.
+            // Dispatch phone is up -> it owns the D-pad (menu nav).
             if (_phoneOpen) return;
 
-            // D-Pad Left always toggles the heli sensor feed.
             bool camOn = _newsCam != null;
             if (Game.IsControlJustPressed(GTA.Control.PhoneLeft)) ToggleNewsChopperCamera();
 
             if (camOn)
             {
-                // While the feed is up, the D-pad drives the CAMERA, not the cruiser:
-                // Up/Down = optical zoom, Right = cycle EO/Night-Vision/Thermal optics.
                 if (Game.IsControlJustPressed(GTA.Control.PhoneUp)) HeliCamZoomStep(+1);
                 if (Game.IsControlJustPressed(GTA.Control.PhoneDown)) HeliCamZoomStep(-1);
                 if (Game.IsControlJustPressed(GTA.Control.PhoneRight)) HeliCamCycleOptics();
-                return;
-            }
-
-            // D-Pad Up: Ram
-            if (Game.IsControlJustPressed(GTA.Control.PhoneUp))
-            {
-                if (Valid(_driver))
-                {
-                    Notify("~b~You:~w~ Ram them!");
-                    _lastPit = DateTime.MinValue; // reset pit cooldown
-                    _pitting = false;
-                    TryPit();
-                }
-            }
-            // D-Pad Down: Back off
-            if (Game.IsControlJustPressed(GTA.Control.PhoneDown))
-            {
-                if (Valid(_driver))
-                {
-                    Notify("~b~You:~w~ Back off!");
-                    _idealFollowDistance += 10f;
-                    if (_idealFollowDistance > 50f) _idealFollowDistance = 50f;
-                    Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, _driver, _idealFollowDistance);
-                }
-            }
-            // D-Pad Right: Light 'em up
-            if (Game.IsControlJustPressed(GTA.Control.PhoneRight))
-            {
-                if (Valid(_partner))
-                {
-                    Notify("~b~You:~w~ Light 'em up!");
-                    _engageDistanceThreshold += 15f; // allow engaging earlier
-                    if (_engageDistanceThreshold > 120f) _engageDistanceThreshold = 120f;
-                    _engageSpeedThreshold += 5f;
-                    if (_engageSpeedThreshold > 40f) _engageSpeedThreshold = 40f;
-                    DriveBy(_partner, _suspect);
-                }
             }
         }
 

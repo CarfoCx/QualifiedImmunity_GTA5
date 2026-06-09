@@ -20,9 +20,12 @@ namespace QualifiedImmunity
         private int _heliCamMode;               // 0 = EO/day, 1 = night-vision, 2 = thermal/IR
         private DateTime _heliCamSince = DateTime.Now;
         private Vector3 _heliCamPos = Vector3.Zero;   // last camera position (for telemetry)
+        private bool _feedEnding;                     // pursuit over -> wind-down banner, player exits
+        private DateTime _feedEndingSince = DateTime.MinValue;
+        private const double FeedWindDownSeconds = 30.0;  // auto-close safety
 
         private static readonly string[] OpticsLong = { "EO / DAYLIGHT", "NIGHT-VISION", "THERMAL / IR" };
-        private static readonly string[] OpticsShort = { "EO", "NV", "IR" };
+        private static readonly string[] OpticsShort = { "EO/DAY", "NV GEN-3", "IR WHOT" };
 
         private void ToggleNewsChopperCamera()
         {
@@ -39,6 +42,7 @@ namespace QualifiedImmunity
             _heliCamSince = DateTime.Now;
             _heliCamZoom = 2f;
             _heliCamMode = 0;
+            _feedEnding = false;
             _heliCamPos = HeliCamComputePos(focus);
 
             _newsCam = Camera.Create(ScriptedCameraNameHash.DefaultScriptedCamera,
@@ -53,6 +57,7 @@ namespace QualifiedImmunity
         // Stop rendering the heli cam, tear it down, and clear any optics post-fx.
         private void StopNewsCam()
         {
+            _feedEnding = false;
             if (_newsCam == null) return;
             ScriptCameraDirector.StopRendering(false);
             if (_newsCam.Exists()) _newsCam.Delete();
@@ -60,6 +65,49 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_NIGHTVISION, false);
             Function.Call(Hash.SET_SEETHROUGH, false);
             Function.Call(Hash.CLEAR_TIMECYCLE_MODIFIER);
+        }
+
+        // Pursuit resolved while the feed is live: do NOT cut the view out from
+        // under the player. The feed stays up with a "press X to return" banner
+        // while AIR-1 wraps up overhead; the player exits on their own key (or a
+        // 30s safety timer closes it).
+        private void BeginHeliFeedWindDown()
+        {
+            if (_newsCam == null) { StopNewsCam(); return; }
+            _feedEnding = true;
+            _feedEndingSince = DateTime.Now;
+        }
+
+        // Per-frame feed driver, phase-independent: keeps the camera tracking,
+        // draws the operator HUD, handles the camera controls, and runs the
+        // wind-down banner once the pursuit is over.
+        private void HeliFeedTick()
+        {
+            if (_newsCam == null || !_newsCam.Exists()) { StopNewsCam(); return; }
+
+            UpdateHeliCam();
+            DrawHeliCamHud();
+
+            if (!_phoneOpen)
+            {
+                if (Game.IsControlJustPressed(GTA.Control.PhoneLeft)) { ToggleNewsChopperCamera(); return; }
+                if (Game.IsControlJustPressed(GTA.Control.PhoneUp)) HeliCamZoomStep(+1);
+                if (Game.IsControlJustPressed(GTA.Control.PhoneDown)) HeliCamZoomStep(-1);
+                if (Game.IsControlJustPressed(GTA.Control.PhoneRight)) HeliCamCycleOptics();
+            }
+
+            if (_feedEnding)
+            {
+                // Centered wind-down banner over the feed.
+                Rect(0.5f, 0.205f, 0.40f, 0.052f, 0, 0, 0, 180);
+                HeliText("PURSUIT CONCLUDED - AIR-1 RTB", 0.5f, 0.186f, 0.40f, 235, 200, 90, true);
+                HeliText("PRESS " + _heliCamKey + " OR D-PAD LEFT TO RETURN", 0.5f, 0.216f, 0.30f, 220, 220, 220, true);
+                if ((DateTime.Now - _feedEndingSince).TotalSeconds > FeedWindDownSeconds)
+                {
+                    StopNewsCam();
+                    Notify("~b~AIR-1:~w~ Feed terminated. Returning to base.");
+                }
+            }
         }
 
         private void HeliCamZoomStep(int dir)
@@ -97,13 +145,17 @@ namespace QualifiedImmunity
             }
         }
 
-        // Where the camera looks: the live suspect, else the getaway car.
+        // Where the camera looks: the live suspect, else the getaway car, else the
+        // body the officers are working at the wrap-up scene (so the wind-down
+        // view watches the arrest/inspection from the air instead of going blind).
         private Vector3 HeliCamFocus()
         {
             if (Valid(_suspect)) return _suspect.Position;
-            if (Valid(_suspectCar)) return _suspectCar.Position;
             Ped a = AliveSuspect();
-            return a != null ? a.Position : Vector3.Zero;
+            if (a != null) return a.Position;
+            if (_wrapBody != null && _wrapBody.Exists()) return _wrapBody.Position;
+            if (Valid(_suspectCar)) return _suspectCar.Position;
+            return Vector3.Zero;
         }
 
         // Camera position: mounted just under the real chopper if one is airborne, otherwise
@@ -147,7 +199,9 @@ namespace QualifiedImmunity
         }
 
         // -------------------------------------------------------------------
-        // The sensor-operator overlay
+        // The sensor-operator overlay -- modeled on a real airborne EO/IR
+        // turret display (gimbal az/el, slant range, heading readout, A/C and
+        // target geo coords, LRF/stabilizer status, white-hot IR labeling).
         // -------------------------------------------------------------------
         private void DrawHeliCamHud()
         {
@@ -172,40 +226,77 @@ namespace QualifiedImmunity
             // --- target lock box (project the suspect to screen) ---
             bool locked = DrawTargetBox(focus, r, g, b);
 
+            // --- geometry: gimbal pointing angles + camera heading ---
+            Vector3 d = focus - _heliCamPos;
+            float horiz = (float)Math.Sqrt(d.X * d.X + d.Y * d.Y);
+            // GTA heading: 0 = North (+Y), increases counter-clockwise; convert to
+            // the compass-style clockwise azimuth a turret readout shows.
+            float az = (float)((Math.Atan2(-d.X, d.Y) * 180.0 / Math.PI + 360.0) % 360.0);
+            float el = (float)(Math.Atan2(d.Z, Math.Max(0.01f, horiz)) * 180.0 / Math.PI);
+
             // --- telemetry ---
             float spdMps = tgt != null
                 ? (tgt.IsInVehicle() && tgt.CurrentVehicle != null ? tgt.CurrentVehicle.Speed : tgt.Speed)
                 : (Valid(_suspectCar) ? _suspectCar.Speed : 0f);
             int mph = (int)Math.Round(spdMps * 2.23694f);
-            int hdg = tgt != null ? (int)tgt.Heading : (Valid(_suspectCar) ? (int)_suspectCar.Heading : 0);
-            int altFt = (int)Math.Max(0f, (_heliCamPos.Z - focus.Z) * 3.28084f);
-            int rng = (int)_heliCamPos.DistanceTo(focus);
+            int tgtHdg = tgt != null ? (int)tgt.Heading : (Valid(_suspectCar) ? (int)_suspectCar.Heading : 0);
+            int altAglFt = (int)Math.Max(0f, (_heliCamPos.Z - focus.Z) * 3.28084f);
+            int altMslFt = (int)Math.Max(0f, _heliCamPos.Z * 3.28084f);
+            int slantRng = (int)_heliCamPos.DistanceTo(focus);
+            // Aircraft ground speed: the real ship's if it's flying, else the
+            // virtual orbit rate (radius * angular velocity).
+            float gsMps = (Valid(_heli) && IsDriveable(_heli)) ? _heli.Speed : 48f * 0.18f;
+            int gsKts = (int)Math.Round(gsMps * 1.94384f);
             string street = focus != Vector3.Zero ? World.GetStreetName(focus) : "UNKNOWN";
             string clock = DateTime.Now.ToString("HH:mm:ss");
+            string date = DateTime.Now.ToString("ddMMMyy").ToUpperInvariant();
             bool blink = DateTime.Now.Millisecond < 650;
 
-            // top-left: unit ident + record state (the blinking dot is drawn red on its own)
-            HeliText("LSPD AIR-1  //  CAM-1", 0.02f, 0.030f, 0.34f, r, g, b);
+            // ---- top-left: platform ident, recorder, date/time, crew ----
+            HeliText("LSPD AIR-1  //  MX-10 EO/IR", 0.02f, 0.030f, 0.34f, r, g, b);
             if (blink) Rect(0.028f, 0.072f, 0.007f, 0.012f, 220, 45, 45, 235);
-            HeliText("      REC   " + clock, 0.02f, 0.060f, 0.32f, r, g, b);
+            HeliText("      REC   " + clock + "Z   " + date, 0.02f, 0.060f, 0.32f, r, g, b);
+            HeliText("OPR: TFO-2     PLT: AIR-1A", 0.02f, 0.090f, 0.28f, r, g, b);
 
-            // top-right: optics + zoom (kept inboard so the longest line stays on-screen)
+            // ---- top-right: optics, zoom/FOV, sensor status ----
             HeliText("OPTICS: " + OpticsShort[_heliCamMode], 0.74f, 0.030f, 0.32f, r, g, b);
-            HeliText("ZOOM x" + _heliCamZoom.ToString("0") + "  FOV " + ((int)ZoomToFov(_heliCamZoom)), 0.74f, 0.060f, 0.32f, r, g, b);
+            HeliText("ZOOM x" + _heliCamZoom.ToString("0") + "   FOV " + ZoomToFov(_heliCamZoom).ToString("0.0") + " DEG", 0.74f, 0.060f, 0.32f, r, g, b);
+            HeliText("LRF: RDY    STAB: ON", 0.74f, 0.090f, 0.28f, r, g, b);
 
-            // top-centre: track/lock status
-            if (locked) HeliText("* LOCK *", 0.5f, 0.085f, 0.36f, 120, 255, 120, true);
-            else        HeliText("SCANNING", 0.5f, 0.085f, 0.34f, 235, 200, 90, true);
+            // ---- top-centre: track status + gimbal angles ----
+            if (locked) HeliText("* TRK LOCK *", 0.5f, 0.075f, 0.36f, 120, 255, 120, true);
+            else        HeliText("ACQ / SCANNING", 0.5f, 0.075f, 0.34f, 235, 200, 90, true);
+            HeliText("AZ " + az.ToString("000.0") + "   EL " + el.ToString("+00.0;-00.0"), 0.5f, 0.108f, 0.30f, r, g, b, true);
 
-            // bottom-left: target telemetry
-            HeliText("TGT SPD: " + mph + " MPH", 0.02f, 0.860f, 0.32f, r, g, b);
-            HeliText("TGT HDG: " + hdg + " DEG", 0.02f, 0.890f, 0.32f, r, g, b);
-            HeliText("LOC: " + street, 0.02f, 0.920f, 0.32f, r, g, b);
+            // ---- bottom-centre: camera heading readout ----
+            HeliText("HDG " + ((int)az).ToString("000") + " " + Cardinal(az), 0.5f, 0.840f, 0.32f, r, g, b, true);
 
-            // bottom-right: platform telemetry
-            HeliText("ALT: " + altFt + " FT AGL", 0.74f, 0.860f, 0.32f, r, g, b);
-            HeliText("RNG: " + rng + " M", 0.74f, 0.890f, 0.32f, r, g, b);
-            HeliText("GPS: " + focus.X.ToString("0.0") + " / " + focus.Y.ToString("0.0"), 0.74f, 0.920f, 0.32f, r, g, b);
+            // ---- bottom-left: target telemetry ----
+            HeliText("TGT SPD: " + mph + " MPH   HDG " + tgtHdg.ToString("000"), 0.02f, 0.830f, 0.30f, r, g, b);
+            HeliText("LOC: " + street, 0.02f, 0.860f, 0.30f, r, g, b);
+            HeliText("TGT POS: " + GeoCoord(focus), 0.02f, 0.890f, 0.28f, r, g, b);
+            HeliText("LRF SLANT: " + slantRng + " M", 0.02f, 0.920f, 0.28f, r, g, b);
+
+            // ---- bottom-right: aircraft telemetry ----
+            HeliText("ALT " + altAglFt + " FT AGL / " + altMslFt + " MSL", 0.74f, 0.830f, 0.28f, r, g, b);
+            HeliText("GS " + gsKts + " KTS", 0.74f, 0.860f, 0.28f, r, g, b);
+            HeliText("A/C POS: " + GeoCoord(_heliCamPos), 0.74f, 0.890f, 0.28f, r, g, b);
+            HeliText(_heliCamMode == 2 ? "POL: WHOT" : (_heliCamMode == 1 ? "GAIN: AUTO" : "IRIS: AUTO"), 0.74f, 0.920f, 0.28f, r, g, b);
+        }
+
+        // Compass cardinal for a clockwise-from-north azimuth.
+        private static string Cardinal(float az)
+        {
+            string[] pts = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+            return pts[(int)Math.Round(az / 45.0) % 8];
+        }
+
+        // Fake-but-plausible geo readout: world meters mapped onto LA-ish lat/lon.
+        private static string GeoCoord(Vector3 p)
+        {
+            double lat = 34.0522 + p.Y / 111320.0;
+            double lon = -118.2437 + p.X / 92385.0;
+            return "N" + lat.ToString("0.00000") + "  W" + Math.Abs(lon).ToString("0.00000");
         }
 
         // Corner brackets around the active sensor area + a slow downward refresh sweep.
