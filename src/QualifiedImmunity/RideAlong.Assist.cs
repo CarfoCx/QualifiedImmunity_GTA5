@@ -37,7 +37,10 @@ namespace QualifiedImmunity
             _threat = threat;
 
             float gap = _copCar.Position.DistanceTo(_threat.Position);
-            if (gap < 32f)
+            // Same rule as pursuits: shooting from the windows is for moving cars.
+            // If the cruiser has stopped anywhere near the threat, get out and fight.
+            bool stoppedNearby = _copCar.Speed < 2.0f && gap < 50f && CarStalled();
+            if (gap < 32f || stoppedNearby)
             {
                 if (!_assistEngaged)
                 {
@@ -125,6 +128,7 @@ namespace QualifiedImmunity
             bool fought = _assistEngaged;
             _threat = null;
             _assistEngaged = false;
+            ReleaseCalloutPerps();   // staged radio-call perps go back to the engine
 
             if (!fought)
             {

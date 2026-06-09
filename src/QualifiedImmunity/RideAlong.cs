@@ -11,7 +11,7 @@ namespace QualifiedImmunity
     // C# 5-compatible (in-box csc), API names verified against SHVDNE.
     public partial class RideAlong : Script
     {
-        private enum Phase { Idle, EnRoute, Boarding, Riding, Pursuit, Wrapup, Regroup, Assist, Clearing }
+        private enum Phase { Idle, EnRoute, Boarding, Riding, Pursuit, Wrapup, Regroup, Assist, Clearing, UCDrive, UCStake }
 
         // ---- Keybinds (loaded from QualifiedImmunity.ini under [Keys]) ----
         private Keys _requestKey = Keys.F9;
@@ -46,6 +46,15 @@ namespace QualifiedImmunity
         private float _spawnDistanceMin = 75.0f;   // how far off the unit spawns to drive in
         private float _spawnDistanceMax = 130.0f;
         private int _maxReplacementUnits = 2;      // replacement units dispatched if yours is lost
+        private int _eliteUnitChance = 6;          // % chance the unit is NOOSE/FIB/Agency
+        private int _undercoverChance = 5;         // % chance the unit is an undercover sting
+
+        // 0 = regular LSPD; 1 = NOOSE/SWAT; 2 = FIB; 3 = "the Agency" (CIA-flavored IAA).
+        private int _eliteUnit;
+        // Undercover sting ride: plainclothes officers in an unmarked Police4 who run
+        // a staged drug-buy bust mission with the player as backup.
+        private bool _undercover;
+        private Vector3 _ucScene = Vector3.Zero;   // where the deal is staged
 
         // Unit-downed recovery state.
         private int _replacementsUsed;
@@ -93,12 +102,17 @@ namespace QualifiedImmunity
         private DateTime _lastTourniquet = DateTime.MinValue;
         private DateTime _lastAssaultScan = DateTime.MinValue;
         private DateTime _lastCoverUp = DateTime.MinValue;   // throttle the cover-up lines
+        private DateTime _lastBanter = DateTime.MinValue;    // partner-banter pacing
+        private double _banterDelay = 50.0;
 
         // Connected to local PD: the live ambient engagement we're backing up.
         private Ped _threat;
         private bool _assistEngaged;
         private double _clearDelay = 7.0;             // 5-10s "scene clear" pause
         private DateTime _lastEngageScan = DateTime.MinValue;
+        private double _rideCalloutDelay = 45.0;      // gap before a staged local radio call
+        private readonly System.Collections.Generic.List<Ped> _calloutPerps =
+            new System.Collections.Generic.List<Ped>();
         private readonly System.Collections.Generic.List<Entity> _backupEntities =
             new System.Collections.Generic.List<Entity>();
         private readonly System.Collections.Generic.List<Ped> _suspectPeds =
@@ -187,6 +201,28 @@ namespace QualifiedImmunity
             "Hop in! By riding with us you are now, legally, 'an ongoing investigation'."
         };
 
+        // Partner banter: when the two officers are together they compliment each
+        // other and trash the suspects. A/B are call-and-reply pairs by index.
+        // Keep in sync (order + count) with $banter_a/$banter_b in tools/gen_audio.ps1.
+        private static readonly string[] BanterA =
+        {
+            "Great shooting out there, partner.",
+            "These suspects get dumber every year.",
+            "You ever miss a shot?",
+            "That perp ran like he had somewhere to be.",
+            "You're glowing today. New body armor?",
+            "Remember that guy who 'knew his rights'?"
+        };
+        private static readonly string[] BanterB =
+        {
+            "Great driving. Together we're basically ONE competent officer.",
+            "Lucky for them, the paperwork can't read either.",
+            "Only court dates.",
+            "He did. The morgue. ...I'm hilarious.",
+            "Crunches. And a suspect-funded confidence boost.",
+            "HA! Classic. Anyway, he's community service now."
+        };
+
         // Spoken when the ride-along player wings a civilian: you're one of us, so
         // the cover-up machine activates on your behalf. Keep in sync (order +
         // count) with $cover in tools/gen_audio.ps1.
@@ -194,7 +230,7 @@ namespace QualifiedImmunity
         {
             "I saw the whole thing. The civilian assaulted your bullet.",
             "He was charging you. From behind. While fleeing. Textbook.",
-            "Relax, deputy. That's exactly what the settlement fund is for.",
+            "Relax, deputy. The city has a guy for this.",
             "Nice grouping! I'll put 'resisting' in the report.",
             "Whoa there! ...Eh, he probably had warrants. Carry on.",
             "Don't sweat it. You're one of us -- that never happened."
@@ -237,9 +273,17 @@ namespace QualifiedImmunity
         // patrol, responding -- so the AI drives like a real-life driver.
         private const int DRIVE_STYLE = 786603;
 
-        // PURSUIT style: weave through traffic and run lights to keep up with a fleeing
-        // suspect. Only used during active chases/PITs -- never for normal driving.
-        private const int RIDE_DRIVE_STYLE = 786468; // DrivingStyle.AvoidTraffic
+        // PURSUIT style for OUR officers: weave through traffic and run lights, but
+        // with every avoidance flag on -- swerve moving cars (4), steer around
+        // parked/empty cars (8), peds (16) and objects (32), and allow wrong-way
+        // (512) so the AI holds speed instead of snapping lanes into obstacles.
+        // (The old 786468 only avoided moving cars + objects, which is why chase
+        // cruisers clipped parked cars and street furniture.)
+        private const int RIDE_DRIVE_STYLE = 787004;
+
+        // FLEE style for suspects: the old, sloppier avoidance set. Fleeing perps
+        // are SUPPOSED to clip mirrors and eat fences; the precision is for cops.
+        private const int FLEE_DRIVE_STYLE = 786468;
 
         // How far around the cruiser we look for other cops already in a fight.
         private const float ASSIST_SCAN_RADIUS = 90f;
@@ -294,6 +338,9 @@ namespace QualifiedImmunity
             _spawnDistanceMin = s.GetValue("RideAlong", "SpawnDistanceMin", _spawnDistanceMin);
             _spawnDistanceMax = s.GetValue("RideAlong", "SpawnDistanceMax", _spawnDistanceMax);
             _maxReplacementUnits = s.GetValue("RideAlong", "MaxReplacementUnits", _maxReplacementUnits);
+            _eliteUnitChance  = s.GetValue("RideAlong", "EliteUnitChance", _eliteUnitChance);
+            _undercoverChance = s.GetValue("RideAlong", "UndercoverChance", _undercoverChance);
+            _showUnitHud      = s.GetValue("RideAlong", "ShowUnitHud", _showUnitHud);
 
             // Pursuit options
             _innocentChance       = s.GetValue("Pursuit", "InnocentChance", _innocentChance);
@@ -529,6 +576,7 @@ namespace QualifiedImmunity
             _engaged = false; _pitting = false;
             _threat = null; _assistEngaged = false;
             _wrapBody = null;
+            ReleaseCalloutPerps();
             SpawnUnit(player, true);
         }
 
@@ -568,16 +616,43 @@ namespace QualifiedImmunity
             // ground under it before it's tasked to drive.
             Function.Call(Hash.REQUEST_COLLISION_AT_COORD, roadPos.X, roadPos.Y, roadPos.Z);
 
+            // Small chance dispatch sends a SPECIAL unit instead of a black-and-white:
+            // a NOOSE tactical van, an FIB Granger, or an unmarked "Agency" Buffalo --
+            // with matching crew and serious hardware (see OutfitEliteUnit).
+            VehicleHash carModel = VehicleHash.Police3;
+            PedHash copModel = PedHash.Cop01SMY;
+            _eliteUnit = 0;
+            // Rarest first: an undercover sting ride (plainclothes officers in an
+            // unmarked Police4 -- it has the hidden flashers). Replacements are
+            // always regular units. Otherwise, small chance of a special unit.
+            _undercover = !isReplacement && _rng.Next(100) < _undercoverChance;
+            if (_undercover)
+            {
+                carModel = VehicleHash.Police4;
+                copModel = PedHash.Business01AMY;
+            }
+            else if (_rng.Next(100) < _eliteUnitChance)
+            {
+                switch (_rng.Next(3))
+                {
+                    case 0: _eliteUnit = 1; carModel = VehicleHash.Riot; copModel = PedHash.Swat01SMY;     break;
+                    case 1: _eliteUnit = 2; carModel = VehicleHash.FBI2; copModel = PedHash.FibSec01SMM;   break;
+                    default: _eliteUnit = 3; carModel = VehicleHash.FBI; copModel = PedHash.CiaSec01SMM;   break;
+                }
+            }
+
             // Spawn slightly in the air so the chassis doesn't clip into the road mesh
             Vector3 spawnPos = new Vector3(roadPos.X, roadPos.Y, roadPos.Z + 2.5f);
-            _copCar = World.CreateVehicle(new Model(VehicleHash.Police3), spawnPos);
+            _copCar = World.CreateVehicle(new Model(carModel), spawnPos);
             if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); Cleanup(); return; }
             Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _copCar);
             Function.Call(Hash.FREEZE_ENTITY_POSITION, _copCar, false); // ensure physics is active, not frozen
+            if (_eliteUnit != 0) DeckOutVehicle(_copCar);
 
-            _driver = _copCar.CreatePedOnSeat(VehicleSeat.Driver, new Model(PedHash.Cop01SMY));
-            bool hasPartner = _rng.Next(2) == 0;                 // ~50% chance of a two-officer car
-            if (hasPartner) _partner = _copCar.CreatePedOnSeat(VehicleSeat.Passenger, new Model(PedHash.Cop01SMY));
+            _driver = _copCar.CreatePedOnSeat(VehicleSeat.Driver, new Model(copModel));
+            // Elite units always roll two-deep; regular cars ~50% chance of a partner.
+            bool hasPartner = _eliteUnit != 0 || _rng.Next(2) == 0;
+            if (hasPartner) _partner = _copCar.CreatePedOnSeat(VehicleSeat.Passenger, new Model(copModel));
 
             _playerSeat = hasPartner ? 2 : 0;                    // rear-right if partnered, else front passenger
 
@@ -629,6 +704,14 @@ namespace QualifiedImmunity
             CopNames.Apply(_driver);
             if (Valid(_partner)) CopNames.Apply(_partner);
 
+            // Elite gear AFTER CopNames.Apply so the operator loadout/health wins
+            // over the rank-based one.
+            if (_eliteUnit != 0)
+            {
+                OutfitEliteUnit(_driver);
+                OutfitEliteUnit(_partner);
+            }
+
             // Drive to the player's nearest road. The first task is issued the same
             // frame the driver spawns, which often doesn't "take", so EnRoute also
             // re-issues this periodically -- _lastReissue starts at MinValue so the
@@ -655,8 +738,17 @@ namespace QualifiedImmunity
             Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, Game.Player);
             Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, Game.Player, true);
 
-            Notify(isReplacement ? "~b~Dispatch:~w~ Replacement unit en route. Stand by."
-                                 : "~b~Dispatch:~w~ Unit en route for your ride-along. Stand by.");
+            if (_undercover)
+                Notify("~b~Dispatch:~w~ Your unit is... a gray sedan. Plainclothes. Don't wave, don't point, don't blow their cover.");
+            else if (_eliteUnit == 1)
+                Notify("~b~Dispatch:~w~ All regular units are busy, so... NOOSE tactical is picking you up. Don't touch anything.");
+            else if (_eliteUnit == 2)
+                Notify("~b~Dispatch:~w~ A federal unit was 'in the area'. The FIB is your chauffeur today. Lucky you.");
+            else if (_eliteUnit == 3)
+                Notify("~b~Dispatch:~w~ Be advised: this unit does not exist, and neither does this ride-along. Enjoy.");
+            else
+                Notify(isReplacement ? "~b~Dispatch:~w~ Replacement unit en route. Stand by."
+                                     : "~b~Dispatch:~w~ Unit en route for your ride-along. Stand by.");
             _lastProgress = DateTime.Now;
             _lastReissue = DateTime.MinValue;
             _copGrounded = false;
@@ -744,7 +836,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.4:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -816,6 +908,9 @@ namespace QualifiedImmunity
             }
 
             TourniquetTick(player);
+            UnitProgressTick();   // XP for shooting/kills, level-ups
+            BanterTick();         // partner small talk: compliments + suspect slander
+            DrawUnitHud();        // officer HP/XP bars + cruiser health
 
             if (_phase == Phase.Pursuit) DrawHUD();
             DrawDebug();
@@ -983,7 +1078,9 @@ namespace QualifiedImmunity
                             Function.Call(Hash.CLEAR_PED_TASKS, _driver);
                             if (Valid(_partner)) Function.Call(Hash.CLEAR_PED_TASKS, _partner);
 
-                            // Issue driving wander directly
+                            // An undercover ride goes straight into its sting mission;
+                            // everyone else starts a normal patrol wander.
+                            if (_undercover && StartUndercoverMission(player)) return;
                             Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, DRIVE_STYLE);
                             _lastWander = DateTime.Now;
                             _lastCarMoving = DateTime.Now; // prevent immediate CarStalled triggering
@@ -1059,6 +1156,37 @@ namespace QualifiedImmunity
                                 Ped threat = GetCombatThreat(engagedCop);
                                 if (threat != null) { StartAssist(threat); break; }
                             }
+
+                            // Gunshots are a CALL, not ambience: any audible shooter in
+                            // the area and the unit responds -- no line of sight needed,
+                            // you can HEAR it.
+                            Ped shooter = FindAudibleShooter(130f);
+                            if (shooter != null)
+                            {
+                                Notify("~r~Dispatch (radio):~w~ Shots fired near " +
+                                       World.GetStreetName(shooter.Position) + "! Closest unit, respond!");
+                                Notify("~b~" + CopNames.For(_driver) + ":~w~ That's us! Hold onto something.");
+                                StartAssist(shooter);
+                                break;
+                            }
+
+                            // Visible street crime (carjackings, brawls) in the crew's
+                            // line of sight gets the same enthusiasm.
+                            Ped perp = FindVisibleCriminal(70f);
+                            if (perp != null)
+                            {
+                                Notify("~b~" + CopNames.For(_driver) + ":~w~ You seeing this? Actual crime! In PUBLIC! Let's go!");
+                                StartAssist(perp);
+                                break;
+                            }
+                        }
+
+                        // Between pursuits, dispatch occasionally raises a local radio
+                        // call (shots fired nearby) for the unit to respond to.
+                        if (SecondsInPhase > _rideCalloutDelay)
+                        {
+                            _rideCalloutDelay = double.MaxValue;   // one attempt per patrol stretch
+                            if (TryStageCallout(player)) break;
                         }
 
                         if (SecondsInPhase > _ridePursuitDelay)
@@ -1121,6 +1249,14 @@ namespace QualifiedImmunity
                     HandleWrapup(player);
                     break;
 
+                case Phase.UCDrive:
+                    HandleUCDrive(player);
+                    break;
+
+                case Phase.UCStake:
+                    HandleUCStake(player);
+                    break;
+
                 case Phase.Regroup:
                     HandleRegroup(player);
                     break;
@@ -1168,6 +1304,85 @@ namespace QualifiedImmunity
                 if (bp != null && bp.Exists() && bp.Handle == h) return true;
             }
             return false;
+        }
+
+        // A non-cop ped actively FIRING a weapon within earshot of the cruiser.
+        // No line-of-sight requirement: gunshots are heard, not seen.
+        private Ped FindAudibleShooter(float radius)
+        {
+            if (!Valid(_copCar)) return null;
+            Ped player = Game.Player.Character;
+            foreach (Ped p in WorldCache.GetNearbyPeds(_copCar.Position, radius))
+            {
+                if (p == null || !p.Exists() || p.IsDead || p == player) continue;
+                if (IsCopPed(p) || RideAlongRegistry.FriendlyCops.Contains(p.Handle)) continue;
+                if (IsSuspectPed(p)) continue;
+                if (Function.Call<bool>(Hash.IS_PED_SHOOTING, p)) return p;
+            }
+            return null;
+        }
+
+        // A non-cop ped committing visible street crime (carjacking or brawling)
+        // in the crew's actual line of sight.
+        private Ped FindVisibleCriminal(float radius)
+        {
+            if (!Valid(_copCar) || !Valid(_driver)) return null;
+            Ped player = Game.Player.Character;
+            foreach (Ped p in WorldCache.GetNearbyPeds(_copCar.Position, radius))
+            {
+                if (p == null || !p.Exists() || p.IsDead || p == player) continue;
+                if (IsCopPed(p) || RideAlongRegistry.FriendlyCops.Contains(p.Handle)) continue;
+                if (IsSuspectPed(p)) continue;
+                bool crime = Function.Call<bool>(Hash.IS_PED_JACKING, p)
+                          || Function.Call<bool>(Hash.IS_PED_IN_MELEE_COMBAT, p);
+                if (!crime) continue;
+                if (!Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, _driver, p, 17)) continue;
+                return p;
+            }
+            return null;
+        }
+
+        // Stage a local radio call between pursuits: a couple of armed troublemakers
+        // firing off rounds a few blocks away. Dispatch raises it on the radio and
+        // the unit responds through the normal assist flow (drive in, engage,
+        // clear the scene). Returns false if no spot could be staged.
+        private bool TryStageCallout(Ped player)
+        {
+            EnsureRelationships();
+            Vector3 spot = FindHiddenSpawn(player.Position, 120f, 240f);
+            if (spot == Vector3.Zero || spot.DistanceTo(player.Position) < 70f) return false;
+
+            Ped first = null;
+            int n = 2 + _rng.Next(2);   // 2-3 perps
+            for (int i = 0; i < n; i++)
+            {
+                Ped p = World.CreatePed(new Model(i % 2 == 0 ? PedHash.StrPunk01GMY : PedHash.Lost01GMY),
+                    spot + RandomOffset(1.5f + i));
+                if (p == null || !p.Exists()) continue;
+                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, p, true, true);
+                SetupSuspectPed(p, _rng.Next(100) < 30 ? 2 : 1);
+                // Fire into the air so the call is AUDIBLE -- this is the gunfire the
+                // radio is reporting (and it organically trips the crime-watch too).
+                Function.Call(Hash.TASK_SHOOT_AT_COORD, p,
+                    spot.X + 2f, spot.Y + 2f, spot.Z + 12f, 12000, unchecked((int)0xC6EE6B4C));
+                _calloutPerps.Add(p);
+                if (first == null) first = p;
+            }
+            if (first == null) return false;
+
+            string street = World.GetStreetName(spot);
+            Notify("~r~Dispatch (radio):~w~ All units: shots fired near " + street + ". Closest unit, respond!");
+            Notify("~b~" + CopNames.For(_driver) + ":~w~ Unit 23 responding! That's us. We're Unit 23 today.");
+            StartAssist(first);
+            return true;
+        }
+
+        // Hand staged callout perps back to the engine (dead ones stay for EMS).
+        private void ReleaseCalloutPerps()
+        {
+            foreach (Ped p in _calloutPerps)
+                if (p != null && p.Exists()) p.MarkAsNoLongerNeeded();
+            _calloutPerps.Clear();
         }
 
         private Ped GetCombatThreat(Ped engagedCop)
@@ -1269,6 +1484,9 @@ namespace QualifiedImmunity
             // pursuits feel like events, not a constant back-to-back stream.
             float span = Math.Max(0f, _pursuitDelayMax - _pursuitDelayMin);
             _ridePursuitDelay = _pursuitDelayMin + _rng.NextDouble() * span;
+            // Local radio calls land on their own clock; when this rolls shorter
+            // than the pursuit delay, the patrol stretch gets a callout instead.
+            _rideCalloutDelay = 30.0 + _rng.NextDouble() * 45.0;
         }
 
         private void AssignCop(Ped c)
@@ -1333,6 +1551,39 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_STAY_IN_VEHICLE_WHEN_JACKED, p, true);
         }
 
+        // Serious hardware for the rare special units: operator armor/health and a
+        // proper long gun. Applied AFTER CopNames.Apply so this loadout wins.
+        private void OutfitEliteUnit(Ped c)
+        {
+            if (!Valid(c) || _eliteUnit == 0) return;
+            Function.Call(Hash.SET_PED_ARMOUR, c, _eliteUnit == 1 ? 100 : 75);
+            Function.Call(Hash.SET_ENTITY_MAX_HEALTH, c, 300);
+            Function.Call(Hash.SET_ENTITY_HEALTH, c, 300);
+            WeaponHash primary = _eliteUnit == 1 ? WeaponHash.CarbineRifle
+                               : _eliteUnit == 2 ? WeaponHash.SpecialCarbine
+                                                 : WeaponHash.AdvancedRifle;
+            WeaponHash sidearm = _eliteUnit == 3 ? WeaponHash.APPistol : WeaponHash.CombatPistol;
+            Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)sidearm), 200, false, false);
+            Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)primary), 400, false, true);
+            if (_eliteUnit == 1) // NOOSE brings the toys
+                Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)WeaponHash.SmokeGrenade), 3, false, false);
+            Function.Call(Hash.SET_PED_ACCURACY, c, 80);
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, c, 2);
+        }
+
+        // Performance + armor mods so the special unit's ride feels decked out.
+        private static void DeckOutVehicle(Vehicle v)
+        {
+            if (v == null || !v.Exists()) return;
+            Function.Call(Hash.SET_VEHICLE_MOD_KIT, v, 0);
+            Function.Call(Hash.SET_VEHICLE_MOD, v, 11, Function.Call<int>(Hash.GET_NUM_VEHICLE_MODS, v, 11) - 1, false); // engine
+            Function.Call(Hash.SET_VEHICLE_MOD, v, 12, Function.Call<int>(Hash.GET_NUM_VEHICLE_MODS, v, 12) - 1, false); // brakes
+            Function.Call(Hash.SET_VEHICLE_MOD, v, 13, Function.Call<int>(Hash.GET_NUM_VEHICLE_MODS, v, 13) - 1, false); // transmission
+            Function.Call(Hash.SET_VEHICLE_MOD, v, 16, Function.Call<int>(Hash.GET_NUM_VEHICLE_MODS, v, 16) - 1, false); // armor
+            Function.Call(Hash.TOGGLE_VEHICLE_MOD, v, 18, true);  // turbo
+            Function.Call(Hash.SET_VEHICLE_TYRES_CAN_BURST, v, false);
+        }
+
         // Put a unit back into calm, road-following PATROL driving after a pursuit/assist.
         // A chase leaves the driver on an aggressive vehicle-chase/ram task (and the
         // AvoidTraffic chase style). If we don't CLEAR that and re-issue a normal drive, the
@@ -1386,6 +1637,25 @@ namespace QualifiedImmunity
                 }
             }
             return null;
+        }
+
+        // When the two officers are together (in the cruiser or standing at a
+        // scene), they swap a compliment and a shot at the suspects.
+        private void BanterTick()
+        {
+            if (!Valid(_driver) || !Valid(_partner)) return;
+            if (_phoneOpen) return;
+            if ((DateTime.Now - _lastBanter).TotalSeconds < _banterDelay) return;
+            if (_driver.Position.DistanceTo(_partner.Position) > 9f) return;
+
+            _lastBanter = DateTime.Now;
+            _banterDelay = 55.0 + _rng.NextDouble() * 55.0;   // every ~1-2 minutes
+
+            int i = _rng.Next(BanterA.Length);
+            Notify("~b~" + CopNames.For(_driver) + ":~w~ " + BanterA[i]);
+            Notify("~b~" + CopNames.For(_partner) + ":~w~ " + BanterB[i]);
+            QIAudio.PlayBanter(i);
+            CopBark(_partner, "GENERIC_HOWS_IT_GOING");
         }
 
         private void RadioChatter()
@@ -1528,6 +1798,8 @@ namespace QualifiedImmunity
             _engaged = false; _pitting = false;
             _threat = null; _assistEngaged = false;
             _wrapBody = null;
+            ReleaseCalloutPerps();
+            ResetProgression();   // fresh officers next ride start at Level 1
             SetPhase(Phase.Idle);
         }
 
@@ -1904,6 +2176,14 @@ namespace QualifiedImmunity
             Cop c;
             if (Assigned.TryGetValue(handle, out c)) { Assigned.Remove(handle); UsedNames.Remove(c.Name); }
         }
+
+        // The rolled rank's baseline accuracy -- the XP system stacks its level
+        // bonus on top of this without ever changing the rank itself.
+        public static int BaseAccuracy(Ped p)
+        {
+            if (p == null || !p.Exists()) return 50;
+            return Ranks[Ensure(p).RankIdx].Accuracy;
+        }
     }
 
     internal static class QIAudio
@@ -1918,9 +2198,9 @@ namespace QualifiedImmunity
         public static void PlayPit(int i) { Play("pit_" + i + ".wav"); }
         public static void PlayCollateralQ(int i) { Play("collateral_q_" + i + ".wav"); }
         public static void PlayCollateralA(int i) { Play("collateral_a_" + i + ".wav"); }
-        public static void PlaySettlement(int i) { Play("settlement_" + i + ".wav"); }
         public static void PlayIaVerdict(int i) { Play("ia_" + i + ".wav"); }
         public static void PlayCover(int i) { Play("cover_" + i + ".wav"); }
+        public static void PlayBanter(int i) { PlaySequence("banter_a_" + i + ".wav", "banter_b_" + i + ".wav", 350); }
 
         private static void Play(string file)
         {

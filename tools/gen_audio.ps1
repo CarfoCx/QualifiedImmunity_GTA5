@@ -152,26 +152,32 @@ $collateral_a = @(
     "Be advised, suspect just used a civilian as a human shield!",
     "Civilian was interfering with an active pursuit! Pushing through!"
 )
-# Keep in sync with SettlementQuips[] in QualifiedImmunity.cs.
-$settlement = @(
-    "Your taxes at work!",
-    "Still cheaper than retraining!",
-    "The officer has been placed on PAID leave.",
-    "No wrongdoing was found. It never is.",
-    "The city disputes the family's account.",
-    "Budget line item: oopsies.",
-    "Thoughts, prayers, and a non-disclosure agreement.",
-    "Don't worry, the pension is safe."
-)
 # The driver covering for the ride-along player who hurt a civilian.
 # Keep in sync with CoverUp[] in RideAlong.cs.
 $cover = @(
     "I saw the whole thing. The civilian assaulted your bullet.",
     "He was charging you. From behind. While fleeing. Textbook.",
-    "Relax, deputy. That's exactly what the settlement fund is for.",
+    "Relax, deputy. The city has a guy for this.",
     "Nice grouping! I'll put resisting in the report.",
     "Whoa there! Eh, he probably had warrants. Carry on.",
     "Don't sweat it. You're one of us. That never happened."
+)
+# Partner banter pairs (A says, B replies). Keep in sync with BanterA/BanterB in RideAlong.cs.
+$banter_a = @(
+    "Great shooting out there, partner.",
+    "These suspects get dumber every year.",
+    "You ever miss a shot?",
+    "That perp ran like he had somewhere to be.",
+    "You're glowing today. New body armor?",
+    "Remember that guy who knew his rights?"
+)
+$banter_b = @(
+    "Great driving. Together we're basically ONE competent officer.",
+    "Lucky for them, the paperwork can't read either.",
+    "Only court dates.",
+    "He did. The morgue. I'm hilarious.",
+    "Crunches. And a suspect-funded confidence boost.",
+    "HA! Classic. Anyway, he's community service now."
 )
 # Keep in sync with IaVerdicts[] in QualifiedImmunity.cs.
 $ia = @(
@@ -189,9 +195,10 @@ for ($i = 0; $i -lt $welcome.Length; $i++) { Make-Clip $welcome[$i] (Join-Path $
 for ($i = 0; $i -lt $pit.Length; $i++) { Make-Clip $pit[$i] (Join-Path $dir "pit_$i.wav") }
 for ($i = 0; $i -lt $collateral_q.Length; $i++) { Make-Clip $collateral_q[$i] (Join-Path $dir "collateral_q_$i.wav") }
 for ($i = 0; $i -lt $collateral_a.Length; $i++) { Make-Clip $collateral_a[$i] (Join-Path $dir "collateral_a_$i.wav") }
-for ($i = 0; $i -lt $settlement.Length; $i++) { Make-Clip $settlement[$i] (Join-Path $dir "settlement_$i.wav") }
 for ($i = 0; $i -lt $ia.Length; $i++) { Make-Clip $ia[$i] (Join-Path $dir "ia_$i.wav") }
 for ($i = 0; $i -lt $cover.Length; $i++) { Make-Clip $cover[$i] (Join-Path $dir "cover_$i.wav") }
+for ($i = 0; $i -lt $banter_a.Length; $i++) { Make-Clip $banter_a[$i] (Join-Path $dir "banter_a_$i.wav") }
+for ($i = 0; $i -lt $banter_b.Length; $i++) { Make-Clip $banter_b[$i] (Join-Path $dir "banter_b_$i.wav") }
 
-Write-Output ("Generated {0} clips into {1}" -f ($radio.Length + $taunt.Length + $welcome.Length + $pit.Length + $collateral_q.Length + $collateral_a.Length + $settlement.Length + $ia.Length + $cover.Length), $dir)
+Write-Output ("Generated {0} clips into {1}" -f ($radio.Length + $taunt.Length + $welcome.Length + $pit.Length + $collateral_q.Length + $collateral_a.Length + $ia.Length + $cover.Length + $banter_a.Length + $banter_b.Length), $dir)
 

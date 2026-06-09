@@ -31,6 +31,8 @@ namespace QualifiedImmunity
         private bool _enableVehicleAssaultResponse = true;
         private bool _enableOfficerAssaultResponse = true;
         private bool _enableWitnessedCrimeResponse = true; // cops pursue an NPC who runs someone down
+        private bool _enableCrimeWatch = true;             // cops react to ANY crime in their line of sight
+        private DateTime _lastCrimeWatch = DateTime.MinValue;
         private float _vehicleAssaultRadius = 60f;       // cops within this of the incident respond
         private float _copCarScanRadius = 80f;           // how far from the player we watch cops/cruisers
         private float _vehicleThreatMemorySeconds = 30f; // how long they keep hunting the offender
@@ -46,17 +48,6 @@ namespace QualifiedImmunity
         // they were flagged. Every badge in the area hunts them until it expires.
         private readonly Dictionary<int, DateTime> _threats = new Dictionary<int, DateTime>();
         private DateTime _lastEnforce = DateTime.MinValue;  // throttle for re-siccing threats
-
-        // ---- City Settlement Fund (satire ticker) --------------------------
-        // Nobody is ever disciplined; the city just cuts a check. Every civilian
-        // the police kill adds a payout to a running shift total -- the mod's
-        // whole thesis in one number.
-        private bool _enableSettlementFund = true;
-        private long _settlementTotal;
-        private int _settlementBodies;
-        private readonly HashSet<int> _settledBodies = new HashSet<int>();
-        private DateTime _lastSettlementScan = DateTime.MinValue;
-        private DateTime _lastSettlementTicker = DateTime.MinValue;
 
         // ---- Internal Affairs gag ------------------------------------------
         // A few seconds after an execution, IA announces the investigation is
@@ -80,19 +71,6 @@ namespace QualifiedImmunity
             "Brotherhood protects its own.",
             "I felt threatened. From over there.",
             "Administrative leave, here I come!"
-        };
-
-        // Keep in sync (order + count) with $settlement in tools/gen_audio.ps1.
-        private static readonly string[] SettlementQuips =
-        {
-            "Your taxes at work!",
-            "Still cheaper than retraining!",
-            "The officer has been placed on PAID leave.",
-            "No wrongdoing was found. It never is.",
-            "The city disputes the family's account.",
-            "Budget line item: 'Oopsies'.",
-            "Thoughts, prayers, and a non-disclosure agreement.",
-            "Don't worry, the pension is safe."
         };
 
         // Keep in sync (order + count) with $ia in tools/gen_audio.ps1.
@@ -124,11 +102,11 @@ namespace QualifiedImmunity
             _executeSurrenderingChance = s.GetValue("Chaos",  "ExecuteSurrenderingChance", _executeSurrenderingChance);
             _tauntCooldownSeconds      = s.GetValue("Chaos",  "TauntCooldownSeconds", _tauntCooldownSeconds);
             _enableCivilianTargeting   = s.GetValue("Chaos",  "EnableCivilianTargeting", _enableCivilianTargeting);
-            _enableSettlementFund      = s.GetValue("Chaos",  "EnableSettlementFund", _enableSettlementFund);
 
             _enableVehicleAssaultResponse = s.GetValue("Assault", "EnableVehicleAssaultResponse", _enableVehicleAssaultResponse);
             _enableOfficerAssaultResponse = s.GetValue("Assault", "EnableOfficerAssaultResponse", _enableOfficerAssaultResponse);
             _enableWitnessedCrimeResponse = s.GetValue("Assault", "EnableWitnessedCrimeResponse", _enableWitnessedCrimeResponse);
+            _enableCrimeWatch             = s.GetValue("Assault", "EnableCrimeWatch", _enableCrimeWatch);
             _vehicleAssaultRadius         = s.GetValue("Assault", "ResponseRadius", _vehicleAssaultRadius);
             _vehicleThreatMemorySeconds   = s.GetValue("Assault", "ThreatMemorySeconds", _vehicleThreatMemorySeconds);
 
@@ -164,6 +142,7 @@ namespace QualifiedImmunity
             DetectVehicleAssaults(player);
             DetectOfficerAssaults(player);
             DetectWitnessedCrimes(player);
+            CrimeWatch(player);
             EnforceThreats();
 
             foreach (Ped cop in WorldCache.GetNearbyPeds(player.Position, 60f))
@@ -197,7 +176,6 @@ namespace QualifiedImmunity
             }
 
             CivilianUnrest(player);
-            SettlementWatch(player);
             IaVerdictTick();
             CleanupStaleHandles();
         }
@@ -515,6 +493,45 @@ namespace QualifiedImmunity
             }
         }
 
+        // Any crime a badge can SEE gets the full treatment: an NPC firing a gun,
+        // brawling, or jacking a car within line-of-sight of an officer is flagged
+        // as a threat and the area converges on them. (Crimes against cops are
+        // handled by the assault detectors above; this catches everything else --
+        // gang shootouts, muggings, carjackings.) Throttled to ~1/sec.
+        private void CrimeWatch(Ped player)
+        {
+            if (!_enableCrimeWatch) return;
+            if ((DateTime.Now - _lastCrimeWatch).TotalSeconds < 1.0) return;
+            _lastCrimeWatch = DateTime.Now;
+
+            foreach (Ped perp in WorldCache.GetNearbyPeds(player.Position, _copCarScanRadius))
+            {
+                if (perp == null || !perp.Exists() || perp.IsDead || perp == player) continue;
+                if (IsCop(perp)) continue;
+                if (RideAlongRegistry.FriendlyCops.Contains(perp.Handle)) continue;
+                if (_threats.ContainsKey(perp.Handle)) continue;   // already being hunted
+
+                bool crime = Function.Call<bool>(Hash.IS_PED_SHOOTING, perp)
+                          || Function.Call<bool>(Hash.IS_PED_JACKING, perp)
+                          || Function.Call<bool>(Hash.IS_PED_IN_MELEE_COMBAT, perp);
+                if (!crime) continue;
+
+                // A badge has to actually SEE it -- nearby AND clear line of sight.
+                Ped witness = null;
+                foreach (Ped cop in WorldCache.GetNearbyPeds(perp.Position, _vehicleAssaultRadius))
+                {
+                    if (!IsCop(cop) || cop.IsDead) continue;
+                    if (RideAlongRegistry.FriendlyCops.Contains(cop.Handle)) continue;
+                    if (Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, cop, perp, 17))
+                    { witness = cop; break; }
+                }
+                if (witness == null) continue;
+
+                if (FlagThreat(perp, perp.Position))
+                    AnnounceAssault(witness, perp.Position, "Crime in progress, in FRONT of me?! The audacity. Light him up!");
+            }
+        }
+
         // The non-police vehicle that struck the victim (blamed on its driver).
         private Vehicle FindVehicleThatHit(Ped victim, Ped player)
         {
@@ -693,61 +710,8 @@ namespace QualifiedImmunity
         }
 
         // -------------------------------------------------------------------
-        // Settlement fund + Internal Affairs
+        // Internal Affairs
         // -------------------------------------------------------------------
-        // Tally civilians killed by police near the player and post the running
-        // taxpayer bill. Each corpse is counted once (handle-set), blame is checked
-        // against nearby badges/cruisers via the engine's damage records.
-        private void SettlementWatch(Ped player)
-        {
-            if (!_enableSettlementFund) return;
-            if ((DateTime.Now - _lastSettlementScan).TotalSeconds < 2.0) return;
-            _lastSettlementScan = DateTime.Now;
-
-            foreach (Ped civ in WorldCache.GetNearbyPeds(player.Position, 70f))
-            {
-                if (civ == null || !civ.Exists() || !civ.IsDead) continue;
-                if (civ.PedType != PedType.CivMale && civ.PedType != PedType.CivFemale) continue;
-                if (_settledBodies.Contains(civ.Handle)) continue;
-                if (!KilledByPolice(civ)) continue;
-
-                _settledBodies.Add(civ.Handle);
-                _settlementBodies++;
-                // $250k-$3m a body, rounded to a tidy lawyer-friendly figure.
-                long payout = 250000L + (long)(_rng.NextDouble() * 2750000.0);
-                payout = (payout / 50000L) * 50000L;
-                _settlementTotal += payout;
-
-                if ((DateTime.Now - _lastSettlementTicker).TotalSeconds > 12)
-                {
-                    _lastSettlementTicker = DateTime.Now;
-                    int quip = _rng.Next(SettlementQuips.Length);
-                    QIAudio.PlaySettlement(quip);
-                    GTA.UI.Notification.PostTicker(string.Format(
-                        "~g~CITY SETTLEMENT FUND:~w~ +${0:N0} -- ${1:N0} this shift ({2} payouts). {3}",
-                        payout, _settlementTotal, _settlementBodies, SettlementQuips[quip]), false);
-                }
-            }
-
-            // Prune handles of despawned corpses so the counted-set can't grow forever.
-            if (_settledBodies.Count > 96) PruneDeadOrGone(_settledBodies);
-        }
-
-        private bool KilledByPolice(Ped civ)
-        {
-            foreach (Ped cop in WorldCache.GetNearbyPeds(civ.Position, 55f))
-            {
-                if (!IsCop(cop)) continue;
-                if (Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, civ, cop, true)) return true;
-            }
-            foreach (Vehicle v in WorldCache.GetNearbyVehicles(civ.Position, 55f))
-            {
-                if (!IsPoliceVehicle(v)) continue;
-                if (Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, civ, v, true)) return true;
-            }
-            return false;
-        }
-
         // The punchline lands a few seconds after the shot: Internal Affairs has
         // somehow already wrapped up its investigation.
         private void QueueIaVerdict()
@@ -764,18 +728,6 @@ namespace QualifiedImmunity
             int i = _rng.Next(IaVerdicts.Length);
             QIAudio.PlayIaVerdict(i);
             GTA.UI.Notification.PostTicker("~b~Internal Affairs:~w~ " + IaVerdicts[i], false);
-        }
-
-        // Drop set entries whose entity no longer exists (corpses can despawn/be hauled off).
-        private static void PruneDeadOrGone(HashSet<int> set)
-        {
-            List<int> gone = new List<int>();
-            foreach (int h in set)
-            {
-                Ped p = (Ped)Entity.FromHandle(h);
-                if (p == null || !p.Exists()) gone.Add(h);
-            }
-            foreach (int h in gone) set.Remove(h);
         }
 
         private void Taunt(Ped cop)

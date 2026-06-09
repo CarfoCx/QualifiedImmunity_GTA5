@@ -60,7 +60,7 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_FLEE_ATTRIBUTES, _suspect, 0, false); // don't bail the car early
             // Drive off fast. WANDER reliably keeps the suspect MOVING (the mission-flee
             // native left them sitting still, which killed the chase); the cruiser chases it.
-            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _suspect, _suspectCar, _suspectsInnocent ? 35.0f : 50.0f, RIDE_DRIVE_STYLE);
+            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _suspect, _suspectCar, _suspectsInnocent ? 35.0f : 50.0f, FLEE_DRIVE_STYLE);
             Notify(SuspectThreatLine());
 
             // Your unit: into the pursuit-cop group, armed, lights on, chasing.
@@ -200,6 +200,14 @@ namespace QualifiedImmunity
                     _suspect = aliveSusp;
                     Notify("~r~Dispatch:~w~ Suspect jacked a vehicle! RESUME PURSUIT!");
 
+                    // Make the runner actually RUN: without a fresh drive task he'd
+                    // sit parked in his new ride and the officers would just walk
+                    // back up and shoot him in the seat.
+                    Function.Call(Hash.SET_DRIVER_ABILITY, aliveSusp, 1.0f);
+                    Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, aliveSusp, 1.0f);
+                    Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, aliveSusp, _suspectCar, 50.0f, FLEE_DRIVE_STYLE);
+                    Function.Call(Hash.SET_PED_KEEP_TASK, aliveSusp, true);
+
                     // ForceOutAndFight set CA_CanUseVehicles=false on both officers.
                     // Reset their vehicle-chase profile BEFORE re-boarding, otherwise
                     // the driver bails out of the cruiser the instant it enters the seat
@@ -234,7 +242,13 @@ namespace QualifiedImmunity
             bool chasedLongEnough = (DateTime.Now - _lastPursuitStart).TotalSeconds > 6.0;
             bool suspectParked = _suspectStoppedSince != DateTime.MinValue
                                  && (DateTime.Now - _suspectStoppedSince).TotalSeconds > 1.5;
-            if (!_engaged && chasedLongEnough && gap < _engageDistanceThreshold && suspectParked)
+            // Drive-bys are for DRIVING. If both cars have come to a stop near each
+            // other, the officers get out and handle it on foot instead of sitting
+            // in their seats shooting through the windows forever (the "standoff"
+            // case: the chase AI stops a few meters outside the engage threshold).
+            bool standoff = _copCar.Speed < 2.0f && gap < 45f;
+            if (!_engaged && chasedLongEnough && suspectParked
+                && (gap < _engageDistanceThreshold || standoff))
             {
                 _engaged = true;
                 Engage();
@@ -457,6 +471,155 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, shooter, 2, true);                  // CanDoDrivebys
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, shooter, CA_CanLeaveVehicle, false); // ...but don't bail out of the car
             Function.Call(Hash.TASK_DRIVE_BY, shooter, target, 0, 0f, 0f, 0f, 50f, 100, true, unchecked((int)0xC6EE6B4C));
+        }
+
+        // -------------------------------------------------------------------
+        // Undercover sting mission: the plainclothes unit drives the player to a
+        // staged drug buy, stakes it out, then busts it. The dealers fight or run
+        // for their car -- at which point this hands off to the EXISTING pursuit
+        // machinery (engaged fight, vehicle chase resume, backup, wrap-up).
+        // -------------------------------------------------------------------
+        private bool StartUndercoverMission(Ped player)
+        {
+            _undercover = false;   // one sting per ride; afterwards it patrols normally
+            EnsureRelationships();
+
+            Vector3 scene = FindHiddenSpawn(player.Position, 180f, 300f);
+            if (scene == Vector3.Zero || scene.DistanceTo(player.Position) < 60f) return false;
+            _ucScene = scene;
+
+            // Stage the deal: a getaway car parked at the spot + three armed dealers.
+            _suspectPeds.Clear();
+            _suspectCar = World.CreateVehicle(new Model(VehicleHash.Buccaneer),
+                new Vector3(scene.X + 2.5f, scene.Y + 2.5f, scene.Z + 0.5f));
+            if (_suspectCar != null)
+            {
+                Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _suspectCar);
+                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _suspectCar, true, true);
+            }
+            for (int i = 0; i < 3; i++)
+            {
+                Model m = new Model(i == 0 ? PedHash.Dealer01SMY : PedHash.StrPunk01GMY);
+                Ped d = World.CreatePed(m, scene + RandomOffset(2.0f + i));
+                if (d == null || !d.Exists()) continue;
+                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, d, true, true);
+                SetupSuspectPed(d, 2);
+                // Hold the loitering pose until the bust kicks the door in.
+                Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, d, true);
+                Function.Call(Hash.TASK_START_SCENARIO_IN_PLACE, d,
+                    i == 0 ? "WORLD_HUMAN_DRUG_DEALER" : "WORLD_HUMAN_HANG_OUT_STREET", 0, true);
+                _suspectPeds.Add(d);
+            }
+            if (_suspectPeds.Count == 0)
+            {
+                if (Valid(_suspectCar)) _suspectCar.MarkAsNoLongerNeeded();
+                _suspectCar = null;
+                return false;   // staging failed -> fall back to a normal patrol
+            }
+            _suspect = _suspectPeds[0];
+            _suspectThreat = 2;
+            _suspectsInnocent = false;
+
+            // Roll there like a civilian car -- no siren, normal traffic driving.
+            Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
+                scene.X, scene.Y, scene.Z, 17.0f, DRIVE_STYLE, 12.0f);
+            _lastReissue = DateTime.Now;
+            _lastCarMoving = DateTime.Now;
+
+            string street = World.GetStreetName(scene);
+            Notify("~b~" + CopNames.For(_driver) + ":~w~ Buy's going down on " + street +
+                   ". We sit on it, then we hit it. You're my backup. Act natural.");
+            CopBark(_driver, "GENERIC_HOWS_IT_GOING");
+            SetPhase(Phase.UCDrive);
+            return true;
+        }
+
+        private void HandleUCDrive(Ped player)
+        {
+            if (!player.IsInVehicle(_copCar))
+            { Notify("~y~You left the unit mid-operation. Sting's blown. Ride over."); Cleanup(); return; }
+
+            float d = _copCar.Position.DistanceTo(_ucScene);
+            if (d < 30f)
+            {
+                Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 6000); // park it
+                Notify("~b~" + CopNames.For(_driver) + ":~w~ There they are. Eyes forward. Wait for my signal...");
+                SetPhase(Phase.UCStake);
+                return;
+            }
+
+            // Same stall re-kick used everywhere else.
+            if (CarStalled() && (DateTime.Now - _lastReissue).TotalSeconds > 3.0)
+            {
+                _lastReissue = DateTime.Now;
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
+                    _ucScene.X, _ucScene.Y, _ucScene.Z, 17.0f, DRIVE_STYLE, 12.0f);
+            }
+
+            if (SecondsInPhase > 150)
+            {
+                Notify("~y~" + CopNames.For(_driver) + ":~w~ Deal's a bust. The boring kind. Back to patrol.");
+                DespawnPursuitProps();
+                ResumePatrol();
+            }
+        }
+
+        private void HandleUCStake(Ped player)
+        {
+            if (!player.IsInVehicle(_copCar))
+            { Notify("~y~You left the unit mid-operation. Sting's blown. Ride over."); Cleanup(); return; }
+
+            // A short, tense beat... then the signal.
+            if (SecondsInPhase > 8) TriggerBust();
+        }
+
+        private void TriggerBust()
+        {
+            Notify("~r~" + CopNames.For(_driver) + ":~w~ That's the signal - GO GO GO! LSPD! HANDS! ALL THE HANDS!");
+            CopBark(_driver, "GENERIC_WAR_CRY");
+            if (Valid(_copCar)) _copCar.IsSirenActive = true;   // Police4's hidden flashers
+            AssignCop(_driver);
+            AssignCop(_partner);
+
+            // One dealer makes for the getaway car; the rest stand and fight. The
+            // runner is the designated _suspect so the existing engaged-resume logic
+            // turns it into a proper vehicle pursuit when he gets the door open.
+            bool runnerSet = false;
+            foreach (Ped s in _suspectPeds)
+            {
+                if (!Valid(s)) continue;
+                Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, s, false);
+                Function.Call(Hash.CLEAR_PED_TASKS, s);
+                if (!runnerSet && Valid(_suspectCar))
+                {
+                    runnerSet = true;
+                    _suspect = s;
+                    Function.Call(Hash.TASK_ENTER_VEHICLE, s, _suspectCar, -1, -1, 2.0f, 1, 0);
+                    Function.Call(Hash.SET_PED_KEEP_TASK, s, true);
+                }
+                else if (Valid(_driver))
+                {
+                    Function.Call(Hash.TASK_COMBAT_PED, s, _driver, 0, 16);
+                }
+            }
+
+            _engaged = true;
+            ForceOutAndFight(_driver);
+            ForceOutAndFight(_partner);
+
+            // Prime the pursuit-phase state the same way StartPursuit does.
+            _backupCount = 0;
+            _pitting = false; _lastPit = DateTime.MinValue; _lastCollateral = DateTime.MinValue;
+            _swatCalled = false; _heliCalled = false; _swatWaves = 0; _lastSwat = DateTime.Now;
+            _lastRadio = DateTime.Now;
+            _radioDelay = _radioIntervalMin + _rng.NextDouble() * Math.Max(0f, _radioIntervalMax - _radioIntervalMin);
+            _lastBackup = DateTime.Now;
+            _lastReissue = DateTime.Now;
+            _lastCarMoving = DateTime.Now;
+            _escapeTimerStarted = DateTime.MinValue;
+            _suspectStoppedSince = DateTime.MinValue;
+            _lastPursuitStart = DateTime.Now;
+            SetPhase(Phase.Pursuit);
         }
 
         // -------------------------------------------------------------------
