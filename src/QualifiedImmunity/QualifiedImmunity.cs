@@ -48,6 +48,9 @@ namespace QualifiedImmunity
         // they were flagged. Every badge in the area hunts them until it expires.
         private readonly Dictionary<int, DateTime> _threats = new Dictionary<int, DateTime>();
         private DateTime _lastEnforce = DateTime.MinValue;  // throttle for re-siccing threats
+        // Threats we mission-pinned ourselves (cop killers handed over by the
+        // ride-along); released back to the engine when the threat ends.
+        private readonly HashSet<int> _pinnedThreats = new HashSet<int>();
 
         // ---- Panic traffic ---------------------------------------------------
         // Civilian drivers near a shooting cop: most pull to the curb and stay in
@@ -188,6 +191,7 @@ namespace QualifiedImmunity
             DetectOfficerAssaults(player);
             DetectWitnessedCrimes(player);
             CrimeWatch(player);
+            DrainCopKillers();
             EnforceThreats();
 
             foreach (Ped cop in WorldCache.GetNearbyPeds(player.Position, 60f))
@@ -641,7 +645,35 @@ namespace QualifiedImmunity
                 }
                 if (resic) SicCopsOn(offender, offender.Position, true);
             }
-            foreach (int h in expired) _threats.Remove(h);
+            foreach (int h in expired) { _threats.Remove(h); ReleasePinnedThreat(h); }
+        }
+
+        // Suspects who killed ride-along officers, handed over by the RideAlong
+        // script. Their mission pin died with the old unit, so re-pin them (or
+        // the engine could cull the killer mid-manhunt), flag them as threats,
+        // and announce the manhunt. Every badge in the area converges.
+        private void DrainCopKillers()
+        {
+            var list = RideAlongRegistry.PendingCopKillers;
+            if (list.Count == 0) return;
+            foreach (int h in list)
+            {
+                Ped killer = (Ped)Entity.FromHandle(h);
+                if (killer == null || !killer.Exists() || killer.IsDead) continue;
+                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, killer, true, true);
+                _pinnedThreats.Add(h);
+                if (FlagThreat(killer, killer.Position))
+                    AnnounceAssault(NearestCop(killer.Position), killer.Position,
+                        "OFFICER DOWN! Suspect is a COP KILLER - all units, shoot on sight!");
+            }
+            list.Clear();
+        }
+
+        private void ReleasePinnedThreat(int h)
+        {
+            if (!_pinnedThreats.Remove(h)) return;
+            Ped p = (Ped)Entity.FromHandle(h);
+            if (p != null && p.Exists()) p.MarkAsNoLongerNeeded();
         }
 
         // Task every nearby (non-friendly) officer to engage the offender. The
@@ -1086,7 +1118,7 @@ namespace QualifiedImmunity
                 Ped ped = (Ped)Entity.FromHandle(kv.Key);
                 if (ped == null || !ped.Exists() || ped.IsDead) goneThreats.Add(kv.Key);
             }
-            foreach (int h in goneThreats) _threats.Remove(h);
+            foreach (int h in goneThreats) { _threats.Remove(h); ReleasePinnedThreat(h); }
         }
 
         // Remove handles whose peds are dead or despawned from a tracking set.

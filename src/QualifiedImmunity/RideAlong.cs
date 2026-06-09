@@ -114,6 +114,9 @@ namespace QualifiedImmunity
         private double _rideCalloutDelay = 45.0;      // gap before a staged local radio call
         private readonly System.Collections.Generic.List<Ped> _calloutPerps =
             new System.Collections.Generic.List<Ped>();
+        // Live suspects who killed the previous unit; the replacement hunts them.
+        private readonly System.Collections.Generic.List<Ped> _vengeance =
+            new System.Collections.Generic.List<Ped>();
         private readonly System.Collections.Generic.List<Entity> _backupEntities =
             new System.Collections.Generic.List<Entity>();
         private readonly System.Collections.Generic.List<Ped> _suspectPeds =
@@ -570,6 +573,17 @@ namespace QualifiedImmunity
             // The replacement path leaves the Pursuit phase, so UpdateHeliCam stops running --
             // cut the feed here or it'd freeze with its optics (NV/thermal) stuck on screen.
             StopNewsCam();
+
+            // Whoever took the unit down is a COP KILLER. Hand every live suspect/
+            // threat to the gang-AI threat system NOW (area cops converge even if
+            // the ride ends here), and remember them so the replacement unit goes
+            // straight at the killer instead of starting a clueless patrol.
+            _vengeance.Clear();
+            foreach (Ped s in _suspectPeds)
+                if (Valid(s)) { RideAlongRegistry.PendingCopKillers.Add(s.Handle); _vengeance.Add(s); }
+            if (Valid(_threat) && !_vengeance.Contains(_threat))
+            { RideAlongRegistry.PendingCopKillers.Add(_threat.Handle); _vengeance.Add(_threat); }
+
             Ped player = Game.Player.Character;
             if (player == null || !player.Exists()) { Cleanup(); return; }
             if (_replacementsUsed >= _maxReplacementUnits)
@@ -845,7 +859,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.6:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.7:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1089,6 +1103,19 @@ namespace QualifiedImmunity
                             // Clear tasks to stop any fleeing/panicking induced by the player entering
                             Function.Call(Hash.CLEAR_PED_TASKS, _driver);
                             if (Valid(_partner)) Function.Call(Hash.CLEAR_PED_TASKS, _partner);
+
+                            // Vengeance first: if this is a replacement unit and the cop
+                            // killer is still breathing nearby, the new officers go
+                            // STRAIGHT at them -- they know exactly who did it.
+                            Ped killer = null;
+                            foreach (Ped vp in _vengeance) if (Valid(vp)) { killer = vp; break; }
+                            _vengeance.Clear();
+                            if (killer != null && killer.Position.DistanceTo(player.Position) < 250f)
+                            {
+                                Notify("~r~" + CopNames.For(_driver) + ":~w~ THAT'S the one who killed our brothers. No paperwork for this one.");
+                                StartAssist(killer);
+                                return;
+                            }
 
                             // An undercover ride goes straight into its sting mission;
                             // everyone else starts a normal patrol wander.
@@ -1814,6 +1841,7 @@ namespace QualifiedImmunity
             _threat = null; _assistEngaged = false;
             _wrapBody = null;
             ReleaseCalloutPerps();
+            _vengeance.Clear();
             ResetProgression();   // fresh officers next ride start at Level 1
             SetPhase(Phase.Idle);
         }
@@ -2005,6 +2033,14 @@ namespace QualifiedImmunity
         public static readonly System.Collections.Generic.HashSet<int> FriendlyCops =
             new System.Collections.Generic.HashSet<int>();
         public static bool Active = false;
+
+        // Ped handles that killed a ride-along officer. The QualifiedImmunity
+        // script drains this each tick: pins them, flags them as threats, and
+        // every badge in the area converges. (The officer-assault detector skips
+        // FriendlyCops victims by design, so without this hand-off a suspect
+        // could wipe the unit and stroll away from the replacement.)
+        public static readonly System.Collections.Generic.List<int> PendingCopKillers =
+            new System.Collections.Generic.List<int>();
     }
 
     internal static class CopNames
