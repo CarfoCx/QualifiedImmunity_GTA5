@@ -346,13 +346,16 @@ namespace QualifiedImmunity
                 CopLine(First(ev.Cops), "Shots fired! All units respond!");
             }
 
-            if ((DateTime.Now - ev.Since).TotalSeconds > 3.0) { EnsureFighting(ev); ev.Since = DateTime.Now; }
-
+            // End-of-fight check FIRST: the EnsureFighting refresh below resets ev.Since
+            // every ~3s, so if it ran before this check the 8s settle window could never
+            // elapse and dead scenes lingered until the 150s safety timeout.
             if (suspAlive == 0 || copsAlive == 0)
             {
                 if (ev.Stage == 0) { ev.Stage = 9; ev.Since = DateTime.Now; }
                 return (DateTime.Now - ev.Since).TotalSeconds < 8; // let it settle, then release
             }
+
+            if ((DateTime.Now - ev.Since).TotalSeconds > 3.0) { EnsureFighting(ev); ev.Since = DateTime.Now; }
             return age < 150; // safety timeout
         }
 

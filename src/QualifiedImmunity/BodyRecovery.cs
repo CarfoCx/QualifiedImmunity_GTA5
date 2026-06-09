@@ -252,6 +252,14 @@ namespace QualifiedImmunity
                     || !Function.Call<bool>(Hash.IS_VEHICLE_DRIVEABLE, r.Van, false)
                     || !Valid(r.Driver))
                 {
+                    // If the crew was abandoned mid-carry, put the corpse DOWN properly:
+                    // detach it and restore its collision, or it stays glued to a wandering
+                    // medic (collision off) forever. It stays pinned, so a fresh wagon comes.
+                    if (r.Stage == Stage.Carrying && body != null && body.Exists())
+                    {
+                        Function.Call(Hash.DETACH_ENTITY, body, true, true);
+                        Function.Call(Hash.SET_ENTITY_COLLISION, body, true, true);
+                    }
                     ReleaseCrew(r);
                     _jobs.RemoveAt(i);
                     continue;

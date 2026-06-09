@@ -45,6 +45,24 @@ namespace QualifiedImmunity
         // NPCs who assaulted police (rammed a cruiser or hit an officer) -> when
         // they were flagged. Every badge in the area hunts them until it expires.
         private readonly Dictionary<int, DateTime> _threats = new Dictionary<int, DateTime>();
+        private DateTime _lastEnforce = DateTime.MinValue;  // throttle for re-siccing threats
+
+        // ---- City Settlement Fund (satire ticker) --------------------------
+        // Nobody is ever disciplined; the city just cuts a check. Every civilian
+        // the police kill adds a payout to a running shift total -- the mod's
+        // whole thesis in one number.
+        private bool _enableSettlementFund = true;
+        private long _settlementTotal;
+        private int _settlementBodies;
+        private readonly HashSet<int> _settledBodies = new HashSet<int>();
+        private DateTime _lastSettlementScan = DateTime.MinValue;
+        private DateTime _lastSettlementTicker = DateTime.MinValue;
+
+        // ---- Internal Affairs gag ------------------------------------------
+        // A few seconds after an execution, IA announces the investigation is
+        // already complete. Queued so the punchline lands on a comedic delay.
+        private DateTime _iaVerdictDue = DateTime.MinValue;
+        private DateTime _lastIaVerdict = DateTime.MinValue;
         private readonly Random _rng = new Random();
         // Cops we've already configured. The combat/driver natives are idempotent
         // and persist on the ped, so we apply them once instead of every tick on
@@ -62,6 +80,28 @@ namespace QualifiedImmunity
             "Brotherhood protects its own.",
             "I felt threatened. From over there.",
             "Administrative leave, here I come!"
+        };
+
+        private static readonly string[] SettlementQuips =
+        {
+            "Your taxes at work!",
+            "Still cheaper than retraining!",
+            "The officer has been placed on PAID leave.",
+            "No wrongdoing was found. It never is.",
+            "The city disputes the family's account.",
+            "Budget line item: 'Oopsies'.",
+            "Thoughts, prayers, and a non-disclosure agreement.",
+            "Don't worry, the pension is safe."
+        };
+
+        private static readonly string[] IaVerdicts =
+        {
+            "Investigation complete. The officer acted within policy. (Elapsed: 6 seconds.)",
+            "We have reviewed the footage. There is no footage.",
+            "After carefully reading the officer's own statement, the officer is cleared.",
+            "The deceased had a record: jaywalking (2014). Use of force justified.",
+            "Finding: the bullets acted independently of the officer.",
+            "Case closed. The officer has been nominated for Employee of the Month."
         };
 
         public QualifiedImmunity()
@@ -82,6 +122,7 @@ namespace QualifiedImmunity
             _executeSurrenderingChance = s.GetValue("Chaos",  "ExecuteSurrenderingChance", _executeSurrenderingChance);
             _tauntCooldownSeconds      = s.GetValue("Chaos",  "TauntCooldownSeconds", _tauntCooldownSeconds);
             _enableCivilianTargeting   = s.GetValue("Chaos",  "EnableCivilianTargeting", _enableCivilianTargeting);
+            _enableSettlementFund      = s.GetValue("Chaos",  "EnableSettlementFund", _enableSettlementFund);
 
             _enableVehicleAssaultResponse = s.GetValue("Assault", "EnableVehicleAssaultResponse", _enableVehicleAssaultResponse);
             _enableOfficerAssaultResponse = s.GetValue("Assault", "EnableOfficerAssaultResponse", _enableOfficerAssaultResponse);
@@ -148,6 +189,8 @@ namespace QualifiedImmunity
             }
 
             CivilianUnrest(player);
+            SettlementWatch(player);
+            IaVerdictTick();
             CleanupStaleHandles();
         }
 
@@ -309,6 +352,7 @@ namespace QualifiedImmunity
                     {
                         cop.Task.ShootAt(p, 800);
                         Taunt(cop);
+                        QueueIaVerdict();
                         break;
                     }
                     else if (roll < _executeSurrenderingChance + 0.10) // taser-flavor slice
@@ -474,7 +518,7 @@ namespace QualifiedImmunity
         {
             bool firstOffense = !_threats.ContainsKey(offender.Handle);
             _threats[offender.Handle] = DateTime.Now;
-            SicCopsOn(offender, origin);
+            SicCopsOn(offender, origin, false);
             return firstOffense;
         }
 
@@ -483,6 +527,14 @@ namespace QualifiedImmunity
         private void EnforceThreats()
         {
             if (_threats.Count == 0) return;
+
+            // Expiry runs every tick, but RE-siccing is throttled to ~3s. The in-combat
+            // guard inside SicCopsOn doesn't cover TASK_VEHICLE_CHASE (a vehicle task,
+            // not "combat"), so re-siccing every 200ms tick was ClearAll+re-chasing the
+            // pursuing drivers each tick -- the same restart-the-task-every-tick stutter
+            // fixed everywhere else in the mod.
+            bool resic = (DateTime.Now - _lastEnforce).TotalSeconds > 3.0;
+            if (resic) _lastEnforce = DateTime.Now;
 
             List<int> expired = new List<int>();
             foreach (KeyValuePair<int, DateTime> kv in _threats)
@@ -494,15 +546,18 @@ namespace QualifiedImmunity
                     expired.Add(kv.Key);
                     continue;
                 }
-                SicCopsOn(offender, offender.Position);
+                if (resic) SicCopsOn(offender, offender.Position, true);
             }
             foreach (int h in expired) _threats.Remove(h);
         }
 
         // Task every nearby (non-friendly) officer to engage the offender. The
         // in-combat guard avoids re-issuing the task each tick, which would
-        // otherwise stutter the AI mid-fight.
-        private void SicCopsOn(Ped offender, Vector3 origin)
+        // otherwise stutter the AI mid-fight. isReissue distinguishes the periodic
+        // EnforceThreats refresh from the first sic: a refreshed driver whose car is
+        // already MOVING is presumed to be chasing (vehicle-chase never reads as
+        // "in combat") and is left alone, so the working chase isn't restarted.
+        private void SicCopsOn(Ped offender, Vector3 origin, bool isReissue)
         {
             bool offenderInVehicle = offender.IsInVehicle();
 
@@ -519,9 +574,14 @@ namespace QualifiedImmunity
                     {
                         if (copCar.Driver == cop)
                         {
-                            if (!Function.Call<bool>(Hash.IS_PED_IN_COMBAT, cop, offender))
+                            if (isReissue && copCar.Speed > 2.0f)
                             {
-                                cop.Task.ClearAll();
+                                // moving = the chase is live; don't restart it
+                            }
+                            else if (!Function.Call<bool>(Hash.IS_PED_IN_COMBAT, cop, offender))
+                            {
+                                // No ClearAll first: a re-issued chase task replaces the
+                                // old one on its own; clearing just stalls the car a beat.
                                 Function.Call(Hash.TASK_VEHICLE_CHASE, cop, offender);
                                 Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, cop, 16.0f);
                                 MakeProficientDriver(cop);
@@ -607,6 +667,90 @@ namespace QualifiedImmunity
                     Function.Call(Hash.TASK_COMBAT_PED, civ, shootingCop, 0, 16);
                 }
             }
+        }
+
+        // -------------------------------------------------------------------
+        // Settlement fund + Internal Affairs
+        // -------------------------------------------------------------------
+        // Tally civilians killed by police near the player and post the running
+        // taxpayer bill. Each corpse is counted once (handle-set), blame is checked
+        // against nearby badges/cruisers via the engine's damage records.
+        private void SettlementWatch(Ped player)
+        {
+            if (!_enableSettlementFund) return;
+            if ((DateTime.Now - _lastSettlementScan).TotalSeconds < 2.0) return;
+            _lastSettlementScan = DateTime.Now;
+
+            foreach (Ped civ in WorldCache.GetNearbyPeds(player.Position, 70f))
+            {
+                if (civ == null || !civ.Exists() || !civ.IsDead) continue;
+                if (civ.PedType != PedType.CivMale && civ.PedType != PedType.CivFemale) continue;
+                if (_settledBodies.Contains(civ.Handle)) continue;
+                if (!KilledByPolice(civ)) continue;
+
+                _settledBodies.Add(civ.Handle);
+                _settlementBodies++;
+                // $250k-$3m a body, rounded to a tidy lawyer-friendly figure.
+                long payout = 250000L + (long)(_rng.NextDouble() * 2750000.0);
+                payout = (payout / 50000L) * 50000L;
+                _settlementTotal += payout;
+
+                if ((DateTime.Now - _lastSettlementTicker).TotalSeconds > 12)
+                {
+                    _lastSettlementTicker = DateTime.Now;
+                    GTA.UI.Notification.PostTicker(string.Format(
+                        "~g~CITY SETTLEMENT FUND:~w~ +${0:N0} -- ${1:N0} this shift ({2} payouts). {3}",
+                        payout, _settlementTotal, _settlementBodies,
+                        SettlementQuips[_rng.Next(SettlementQuips.Length)]), false);
+                }
+            }
+
+            // Prune handles of despawned corpses so the counted-set can't grow forever.
+            if (_settledBodies.Count > 96) PruneDeadOrGone(_settledBodies);
+        }
+
+        private bool KilledByPolice(Ped civ)
+        {
+            foreach (Ped cop in WorldCache.GetNearbyPeds(civ.Position, 55f))
+            {
+                if (!IsCop(cop)) continue;
+                if (Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, civ, cop, true)) return true;
+            }
+            foreach (Vehicle v in WorldCache.GetNearbyVehicles(civ.Position, 55f))
+            {
+                if (!IsPoliceVehicle(v)) continue;
+                if (Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, civ, v, true)) return true;
+            }
+            return false;
+        }
+
+        // The punchline lands a few seconds after the shot: Internal Affairs has
+        // somehow already wrapped up its investigation.
+        private void QueueIaVerdict()
+        {
+            if ((DateTime.Now - _lastIaVerdict).TotalSeconds < 45) return; // a gag, not a stream
+            _lastIaVerdict = DateTime.Now;
+            _iaVerdictDue = DateTime.Now.AddSeconds(6.0);
+        }
+
+        private void IaVerdictTick()
+        {
+            if (_iaVerdictDue == DateTime.MinValue || DateTime.Now < _iaVerdictDue) return;
+            _iaVerdictDue = DateTime.MinValue;
+            GTA.UI.Notification.PostTicker(
+                "~b~Internal Affairs:~w~ " + IaVerdicts[_rng.Next(IaVerdicts.Length)], false);
+        }
+
+        // Drop set entries whose entity no longer exists (corpses can despawn/be hauled off).
+        private static void PruneDeadOrGone(HashSet<int> set)
+        {
+            List<int> gone = new List<int>();
+            foreach (int h in set)
+            {
+                Ped p = (Ped)Entity.FromHandle(h);
+                if (p == null || !p.Exists()) gone.Add(h);
+            }
+            foreach (int h in gone) set.Remove(h);
         }
 
         private void Taunt(Ped cop)

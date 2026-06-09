@@ -572,7 +572,10 @@ namespace QualifiedImmunity
             _copCar.IsEngineRunning = true;
             _copCar.IsSirenActive = false; // roll in calm/unassuming -- the siren makes every NPC panic
 
-            RideAlongRegistry.FriendlyCops.Clear();
+            // NOTE: do NOT Clear() the registry here -- it's shared with AmbientPolice,
+            // whose staged officers re-register only every ~350ms. Wiping it handed the
+            // gang-cop AI a window to hijack a peaceful staged scene. Our own previous
+            // unit's handles were already removed (ReleaseCurrentUnit / Cleanup).
             if (Valid(_driver)) RideAlongRegistry.FriendlyCops.Add(_driver.Handle);
             if (Valid(_partner)) RideAlongRegistry.FriendlyCops.Add(_partner.Handle);
 
@@ -696,7 +699,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V6.8:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V6.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -727,6 +730,13 @@ namespace QualifiedImmunity
                 {
                     Notify("~r~Officer:~w~ You just hit a civilian! You're going DOWN!");
                     Cleanup();
+                    // The satire's core asymmetry, played straight: an officer gets paid
+                    // leave for that; the ride-along civilian gets the full machinery of
+                    // the law. Cleanup() has already restored the wanted system, so the
+                    // stars actually stick.
+                    Notify("~b~Dispatch:~w~ Be advised: suspect does NOT have qualified immunity. All units respond.");
+                    Function.Call(Hash.SET_PLAYER_WANTED_LEVEL, Game.Player, 2, false);
+                    Function.Call(Hash.SET_PLAYER_WANTED_LEVEL_NOW, Game.Player, false);
                     return;
                 }
             }
