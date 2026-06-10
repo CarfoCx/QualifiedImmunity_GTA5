@@ -149,6 +149,20 @@ namespace QualifiedImmunity
 
         private void HandleClearing(Ped player)
         {
+            // A lull is NOT the all-clear. If anyone hostile is still up and fighting
+            // (the perp reloading behind cover reads as "not in combat" for a beat),
+            // jump straight back into the engagement instead of standing by and then
+            // abandoning the guy we were just shooting. _threat is null here, so
+            // ResolveThreat scans engaged local cops + in-combat peds near the cruiser.
+            Ped lurker = ResolveThreat();
+            if (lurker != null)
+            {
+                Notify("~r~" + (Valid(_driver) ? CopNames.For(_driver) : "Officer") +
+                       ":~w~ He's still up! Re-engaging!");
+                StartAssist(lurker);
+                return;
+            }
+
             // Keep the officers aboard while they hold and "confirm" the scene.
             bool refresh = SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 5.0;
             if (refresh)
@@ -163,10 +177,14 @@ namespace QualifiedImmunity
                 Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
 
             // Fallback: warp a stuck officer back in so the scene-clear can never hang -- but
-            // only after giving the walk-in animation real time to play.
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16)
+            // only after giving the walk-in animation real time to play, and NEVER while
+            // the officer is actually fighting (yanking them out of combat mid-firefight
+            // is the "instantly ported into the car and gave up" bug).
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // Wait out the confirm-clear pause before moving on.
@@ -218,10 +236,13 @@ namespace QualifiedImmunity
             // Give the animated walk-in real time first (a cop can be several meters away
             // after a foot chase). With the door unlocked + police-AI off, the walk-in
             // normally finishes well before this, so the warp only fires if they're truly
-            // stuck -- you see the animation, not an instant teleport.
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16)
+            // stuck -- you see the animation, not an instant teleport. (Never warp an
+            // officer who's still mid-combat; finish the fight first.)
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18)
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.

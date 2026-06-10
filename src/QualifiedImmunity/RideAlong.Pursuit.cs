@@ -144,6 +144,13 @@ namespace QualifiedImmunity
 
         private void PursuitTick()
         {
+            // TASK_VEHICLE_CHASE swaps driving subtasks as it runs (pursue/ram/block),
+            // and a one-shot SET_DRIVE_TASK_DRIVING_STYLE gets dropped on the swap --
+            // the driver then reverts to the sticky law-abiding patrol style and SITS
+            // AT RED LIGHTS mid-pursuit. Re-assert the pursuit style every tick.
+            if (!_engaged && Valid(_driver) && Valid(_copCar) && _driver.IsInVehicle(_copCar))
+                Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE);
+
             // Keep the chase locked onto a LIVE suspect. If the designated suspect dies but
             // others are still running (multi-suspect / gang pursuits), re-point at one that's
             // actually alive and force a fresh chase task -- otherwise the driver keeps trying

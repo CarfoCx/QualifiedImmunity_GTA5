@@ -46,7 +46,7 @@ namespace QualifiedImmunity
         private float _driverAggressiveness = 0.3f; // 0=calm/road-following, 1=reckless
         private float _spawnDistanceMin = 75.0f;   // how far off the unit spawns to drive in
         private float _spawnDistanceMax = 130.0f;
-        private int _maxReplacementUnits = 2;      // replacement units dispatched if yours is lost
+        private int _maxReplacementUnits = 0;      // replacement units dispatched if yours is lost (0 = ride just ends)
         private int _eliteUnitChance = 6;          // % chance the unit is NOOSE/FIB/Agency
         private int _undercoverChance = 5;         // % chance the unit is an undercover sting
 
@@ -541,12 +541,13 @@ namespace QualifiedImmunity
 
         // Draw text with the game's native text renderer (proper menu font + drop shadow),
         // so it matches GTA's own UI instead of the flat TextElement overlay.
-        private void DrawMenuText(string text, float x, float y, float scale, int font, int r, int g, int b, bool center)
+        private void DrawMenuText(string text, float x, float y, float scale, int font, int r, int g, int b, bool center, bool outline = false)
         {
             Function.Call(Hash.SET_TEXT_FONT, font);
             Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
             Function.Call(Hash.SET_TEXT_COLOUR, r, g, b, 255);
             Function.Call(Hash.SET_TEXT_DROP_SHADOW);
+            if (outline) Function.Call(Hash.SET_TEXT_OUTLINE);   // black stroke -- keeps HUD text readable over bright scenes
             Function.Call(Hash.SET_TEXT_CENTRE, center);
             Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
             Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
@@ -588,7 +589,11 @@ namespace QualifiedImmunity
             if (player == null || !player.Exists()) { Cleanup(); return; }
             if (_replacementsUsed >= _maxReplacementUnits)
             {
-                Notify(reason + " No units left in the area. Ride-along over.");
+                // Default (0 replacements): losing your unit ENDS the ride -- no auto
+                // re-dispatch. Call dispatch again yourself if you want another unit.
+                Notify(_maxReplacementUnits == 0
+                    ? reason + " Your ride-along is over. Call dispatch if you want another unit."
+                    : reason + " No units left in the area. Ride-along over.");
                 Cleanup();
                 return;
             }
@@ -670,6 +675,10 @@ namespace QualifiedImmunity
             if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); Cleanup(); return; }
             Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _copCar);
             Function.Call(Hash.FREEZE_ENTITY_POSITION, _copCar, false); // ensure physics is active, not frozen
+            // Pin marked cruisers to livery 0 -- its roof decal reads 32, which is what
+            // the unit HUD shows, so the callsign matches the number painted on the roof.
+            if (_eliteUnit == 0 && !_undercover)
+                Function.Call(Hash.SET_VEHICLE_LIVERY, _copCar, 0);
             if (_eliteUnit != 0) DeckOutVehicle(_copCar);
 
             _driver = _copCar.CreatePedOnSeat(VehicleSeat.Driver, new Model(copModel));
@@ -703,7 +712,10 @@ namespace QualifiedImmunity
             }
 
             _copCar.IsEngineRunning = true;
-            _copCar.IsSirenActive = false; // roll in calm/unassuming -- the siren makes every NPC panic
+            // You CALLED for a unit -- they respond code 3: lights and siren, traffic
+            // laws optional, fastest possible route. (Arrival kills the siren before
+            // boarding.) The unmarked sting car still rolls in quiet to keep its cover.
+            _copCar.IsSirenActive = !_undercover;
 
             // NOTE: do NOT Clear() the registry here -- it's shared with AmbientPolice,
             // whose staged officers re-register only every ~350ms. Wiping it handed the
@@ -728,11 +740,16 @@ namespace QualifiedImmunity
             if (Valid(_partner)) CopNames.Apply(_partner);
 
             // Elite gear AFTER CopNames.Apply so the operator loadout/health wins
-            // over the rank-based one.
+            // over the rank-based one. Elite calls also roll elite STAFF: rank floored
+            // at Sergeant and re-titled to the unit -- no more NOOSE vans crewed by
+            // rookie "Officers".
             if (_eliteUnit != 0)
             {
                 OutfitEliteUnit(_driver);
                 OutfitEliteUnit(_partner);
+                string eliteTitle = _eliteUnit == 1 ? "Operator" : "Agent";
+                CopNames.ForceEliteRank(_driver, eliteTitle);
+                CopNames.ForceEliteRank(_partner, eliteTitle);
             }
 
             // Drive to the player's nearest road. The first task is issued the same
@@ -830,13 +847,15 @@ namespace QualifiedImmunity
             // scenario without ejecting the ped from the seat.
             if (hardReset) Function.Call(Hash.CLEAR_PED_TASKS, _driver);
 
-            // Calm cruising speed (16 m/s) and a SMALL stop range (4m) so the unit drives in
-            // like normal traffic and pulls right up next to the player, not 8m short.
+            // CODE-3 response: the player CALLED for this unit, so it hustles -- fast
+            // cruise (30 m/s) with the pursuit avoidance style (weave traffic, run
+            // lights, never stop for cars/peds) instead of trundling in like a taxi.
+            // Small stop range (2-4m) so it still pulls right up next to the player.
             if (_driveMethod >= 2)
-                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 16.0f, DRIVE_STYLE);
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 22.0f, RIDE_DRIVE_STYLE);
             else if (_driveMethod == 1)
                 Function.Call(Hash.TASK_VEHICLE_MISSION_PED_TARGET, _driver, _copCar, player,
-                    4, 16.0f, DRIVE_STYLE, 2.0f, 5.0f, false); // 4 == MISSION_GOTO; small stop range -> pulls right up
+                    4, 30.0f, RIDE_DRIVE_STYLE, 2.0f, 5.0f, false); // 4 == MISSION_GOTO; small stop range -> pulls right up
             else
             {
                 // Aim for the ROAD beside the player, not their exact coordinate. The
@@ -847,8 +866,52 @@ namespace QualifiedImmunity
                 Vector3 dest = SnapToRoad(player.Position);
                 if (dest == Vector3.Zero || dest.DistanceTo(player.Position) > 40f) dest = player.Position;
                 Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
-                    dest.X, dest.Y, dest.Z, 16.0f, DRIVE_STYLE, 2.0f); // 2m stop range
+                    dest.X, dest.Y, dest.Z, 30.0f, RIDE_DRIVE_STYLE, 2.0f); // 2m stop range
             }
+        }
+
+        // -------------------------------------------------------------------
+        // The unit defends ITSELF. The global officer-assault watcher skips
+        // FriendlyCops (so it never re-tasks our scripted unit), which meant an
+        // NPC could empty a magazine into the cruiser and the driver would
+        // shrug and keep patrolling. Watch our own car/officers for ped damage
+        // and turn the attacker into the unit's active threat.
+        // -------------------------------------------------------------------
+        private DateTime _lastUnitAttackScan = DateTime.MinValue;
+
+        private void DetectUnitUnderAttack()
+        {
+            if (_phase != Phase.Riding) return;   // chases/assists already have a target
+            if ((DateTime.Now - _lastUnitAttackScan).TotalSeconds < 1.0) return;
+            _lastUnitAttackScan = DateTime.Now;
+
+            bool carHit = Valid(_copCar) && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ANY_PED, _copCar);
+            bool drvHit = Valid(_driver) && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ANY_PED, _driver);
+            bool prtHit = Valid(_partner) && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ANY_PED, _partner);
+            if (!carHit && !drvHit && !prtHit) return;
+
+            Ped player = Game.Player.Character;
+            Ped attacker = null;
+            foreach (Ped p in WorldCache.GetNearbyPeds(_copCar.Position, 60f))
+            {
+                if (p == null || !p.Exists() || p.IsDead || p == player) continue;
+                if (IsCopPed(p) || RideAlongRegistry.FriendlyCops.Contains(p.Handle)) continue;
+                if ((carHit && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, _copCar, p, true))
+                 || (drvHit && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, _driver, p, true))
+                 || (prtHit && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, _partner, p, true)))
+                { attacker = p; break; }
+            }
+            // Clear the records either way so one burst doesn't re-trigger every scan
+            // (player hits land here too -- those run through the grudge system instead).
+            if (Valid(_copCar)) Function.Call(Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY, _copCar);
+            if (Valid(_driver)) Function.Call(Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY, _driver);
+            if (Valid(_partner)) Function.Call(Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY, _partner);
+            if (attacker == null) return;
+
+            EnsureRelationships();
+            SetupSuspectPed(attacker, 0);   // crook group only -- no free gear for the shooter
+            Notify("~r~" + CopNames.For(_driver) + ":~w~ Taking fire! Engaging the shooter!");
+            StartAssist(attacker);
         }
 
         private bool _announcedLoad;
@@ -859,7 +922,7 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V7.7:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V7.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -879,6 +942,9 @@ namespace QualifiedImmunity
             if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's wrecked."); return; }
             PromoteDriverIfNeeded();
             if (!Valid(_driver)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Officers are down."); return; }
+
+            // Someone shooting at OUR cruiser/officers on patrol -> engage them.
+            DetectUnitUnderAttack();
 
             // The ride-along player is ONE OF US -- an honorary deputy wrapped in the
             // same protection the badges enjoy. Wing a civilian and the cover-up
@@ -1910,6 +1976,38 @@ namespace QualifiedImmunity
                 Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, g, _copsGroup);
                 Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, _copsGroup, g);
             }
+
+            // --- One crook side, no infighting ---
+            // A relationship group is NEUTRAL to itself by default, so one stray round
+            // between allied suspects flipped them into fighting EACH OTHER mid-firefight.
+            // Companion (0) = never target an ally. Wire all three QI crook groups
+            // (pursuit suspects, ambient crooks, crime-watch offenders) into one side;
+            // ADD_RELATIONSHIP_GROUP is idempotent, so creating the other scripts'
+            // groups here just guarantees the hashes exist before wiring.
+            OutputArgument c1 = new OutputArgument(), c2 = new OutputArgument();
+            Function.Call(Hash.ADD_RELATIONSHIP_GROUP, "QI_AMB_CROOKS", c1);
+            Function.Call(Hash.ADD_RELATIONSHIP_GROUP, "QI_CRIMEWATCH", c2);
+            int[] crooks = { _suspGroup, c1.GetResult<int>(), c2.GetResult<int>() };
+            foreach (int ga in crooks)
+                foreach (int gb in crooks)
+                    Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 0, ga, gb);
+
+            // Street gangs sit the cop fight out: crooks and gangs respect (1) each
+            // other, so the shootout stays crooks-vs-police instead of dissolving into
+            // everyone-vs-everyone. Gang-vs-gang wars (native hates between the gang
+            // groups themselves) are untouched.
+            string[] gangs = { "AMBIENT_GANG_LOST", "AMBIENT_GANG_MEXICAN", "AMBIENT_GANG_FAMILY",
+                               "AMBIENT_GANG_BALLAS", "AMBIENT_GANG_MARABUNTE", "AMBIENT_GANG_CULT",
+                               "AMBIENT_GANG_SALVA", "AMBIENT_GANG_WEICHENG", "AMBIENT_GANG_HILLBILLY" };
+            foreach (string gn in gangs)
+            {
+                int gg = Function.Call<int>(Hash.GET_HASH_KEY, gn);
+                foreach (int ga in crooks)
+                {
+                    Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, ga, gg);
+                    Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 1, gg, ga);
+                }
+            }
             _relsReady = true;
         }
 
@@ -2187,6 +2285,22 @@ namespace QualifiedImmunity
         {
             Cop c;
             if (Assigned.TryGetValue(handle, out c)) { Assigned.Remove(handle); UsedNames.Remove(c.Name); }
+        }
+
+        // Elite calls roll elite STAFF: floor the rank at Sergeant (heavy primaries,
+        // command-grade stats come with it) and re-title the crew to match the unit,
+        // so a NOOSE van is crewed by Operators, not rookie "Officers".
+        public static void ForceEliteRank(Ped p, string title)
+        {
+            if (p == null || !p.Exists()) return;
+            Cop c = Ensure(p);
+            if (c.RankIdx < 2)
+            {
+                c.RankIdx = 2 + Rng.Next(3);    // Sergeant / Lieutenant / Captain tier
+                RankDef rd = Ranks[c.RankIdx];
+                c.Primary = rd.Primaries[Rng.Next(rd.Primaries.Length)];
+            }
+            c.Display = title + " " + c.Name;
         }
 
         // The rolled rank's baseline accuracy -- the XP system stacks its level

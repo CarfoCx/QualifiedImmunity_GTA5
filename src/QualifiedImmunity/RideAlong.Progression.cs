@@ -134,46 +134,107 @@ namespace QualifiedImmunity
             if (_newsCam != null) return;
             if (!Valid(_copCar)) return;
 
-            const float x = 0.800f, w = 0.180f;
-            float y = 0.50f;
+            // Tucked off to the side (bottom right) and less prominent
+            const float x = 0.850f, w = 0.140f;
+            float y = 0.74f;
 
+            // Regular cruisers are pinned to livery 0 at spawn (SpawnUnit), whose roof
+            // decal reads 32 -- so the HUD callsign matches the number on the roof.
             string title = _eliteUnit == 1 ? "NOOSE UNIT"
                          : _eliteUnit == 2 ? "FIB UNIT"
-                         : _eliteUnit == 3 ? "AGENCY UNIT" : "UNIT 23";
-            Rect(x + w / 2f, y + 0.014f, w, 0.028f, 12, 28, 56, 220);
-            DrawMenuText(title, x + 0.006f, y + 0.002f, 0.28f, 4, 235, 235, 235, false);
-            y += 0.032f;
+                         : _eliteUnit == 3 ? "AGENCY UNIT"
+                         : _undercover ? "UNMARKED" : "UNIT 32";
+            Rect(x + w / 2f, y + 0.015f, w, 0.030f, 12, 28, 56, 160);
+            DrawMenuText(title, x + 0.006f, y + 0.003f, 0.28f, 4, 235, 235, 235, false, true);
+            y += 0.034f;
 
             y = DrawOfficerRow(_driver, x, y, w);
             y = DrawOfficerRow(_partner, x, y, w);
 
             // Cruiser body health (entity health, 0-1000).
             float vh = Math.Max(0f, Math.Min(1f, _copCar.Health / 1000f));
-            Rect(x + w / 2f, y + 0.019f, w, 0.038f, 0, 0, 0, 150);
-            DrawMenuText("CRUISER", x + 0.006f, y + 0.001f, 0.24f, 0, 215, 215, 215, false);
-            DrawBar(x + 0.006f, y + 0.027f, w - 0.012f, 0.007f, vh);
+            Rect(x + w / 2f, y + 0.019f, w, 0.038f, 0, 0, 0, 100);
+            DrawMenuText("CRUISER", x + 0.006f, y + 0.002f, 0.24f, 0, 215, 215, 215, false, true);
+            DrawBar(x + 0.006f, y + 0.030f, w - 0.012f, 0.006f, vh);
         }
 
         private float DrawOfficerRow(Ped c, float x, float y, float w)
         {
             if (c == null || !c.Exists()) return y;
-            const float rowH = 0.052f;
-            Rect(x + w / 2f, y + rowH / 2f, w, rowH, 0, 0, 0, 150);
+            const float rowH = 0.056f;
+            Rect(x + w / 2f, y + rowH / 2f, w, rowH, 0, 0, 0, 100);
 
             string label = c.IsDead
                 ? CopNames.For(c) + "  ~r~K.I.A."
                 : CopNames.For(c) + "  ~y~Lv " + LevelOf(c);
-            DrawMenuText(label, x + 0.006f, y + 0.001f, 0.24f, 0, 235, 235, 235, false);
+            DrawMenuText(label, x + 0.006f, y + 0.002f, 0.24f, 0, 235, 235, 235, false, true);
 
             float maxHp = Math.Max(1, c.MaxHealth);
             float hp = Math.Max(0f, Math.Min(1f, c.Health / maxHp));
-            DrawBar(x + 0.006f, y + 0.030f, w - 0.012f, 0.007f, hp);
+            DrawEcg(x + 0.006f, y + 0.035f, w - 0.012f, 0.010f, c, hp);
 
-            // Thin XP progress strip under the HP bar (gold).
+            // Thin XP progress strip under the heart monitor (gold).
             float xpFrac = LevelOf(c) >= MaxLevel ? 1f : (XpOf(c) % XpPerLevel) / (float)XpPerLevel;
-            DrawBarColored(x + 0.006f, y + 0.041f, w - 0.012f, 0.004f, xpFrac, 235, 200, 80);
+            DrawBarColored(x + 0.006f, y + 0.050f, w - 0.012f, 0.003f, xpFrac, 235, 200, 80);
 
             return y + rowH + 0.004f;
+        }
+
+        // -------------------------------------------------------------------
+        // Hospital-style heart monitor in place of an HP bar: a scrolling ECG
+        // trace whose rate climbs and spikes shrink as the officer fades --
+        // and a dead officer reads as a red flatline.
+        // -------------------------------------------------------------------
+
+        // One heartbeat sampled into a lookup strip: baseline, P bump, QRS spike, T bump.
+        private static readonly float[] EcgBeat = BuildEcgBeat();
+
+        private static float[] BuildEcgBeat()
+        {
+            var s = new float[48];
+            s[8] = 0.10f; s[9] = 0.16f; s[10] = 0.10f;                              // P wave
+            s[14] = -0.18f;                                                          // Q dip
+            s[15] = 0.55f; s[16] = 1.00f; s[17] = 0.45f;                             // R spike
+            s[18] = -0.30f; s[19] = -0.12f;                                          // S dip
+            s[26] = 0.10f; s[27] = 0.22f; s[28] = 0.26f; s[29] = 0.22f; s[30] = 0.10f; // T wave
+            return s;
+        }
+
+        private void DrawEcg(float left, float cy, float w, float halfH, Ped c, float hpFrac)
+        {
+            Rect(left + w / 2f, cy, w, halfH * 2f + 0.003f, 0, 0, 0, 130);   // monitor backing
+
+            bool dead = c.IsDead;
+            int r, g, b;
+            if (dead) { r = 230; g = 50; b = 50; }
+            else
+            {
+                r = (int)(200 - 140 * hpFrac);   // green when healthy...
+                g = (int)(60 + 140 * hpFrac);    // ...red when critical
+                b = 60;
+            }
+
+            int offset = 0;
+            if (!dead)
+            {
+                // Heart rate climbs as health drops: ~65 bpm healthy -> ~150 bpm critical.
+                int period = 400 + (int)(520 * hpFrac);
+                offset = (int)((long)(Game.GameTime % period) * EcgBeat.Length / period);
+            }
+
+            const int segs = 30;
+            float segW = w / segs;
+            for (int i = 0; i < segs; i++)
+            {
+                float amp = 0f;
+                if (!dead)
+                {
+                    int idx = (i * EcgBeat.Length * 2 / segs + offset) % EcgBeat.Length; // ~2 beats across the strip
+                    amp = EcgBeat[idx] * (0.35f + 0.65f * hpFrac);   // weaker spikes as they fade
+                }
+                float h = Math.Max(0.0016f, Math.Abs(amp) * halfH);
+                Rect(left + segW * (i + 0.5f), cy - amp * halfH * 0.5f, segW, h, r, g, b, 235);
+            }
         }
 
         // Left-anchored bar: dark backing + green-to-red fill by fraction.

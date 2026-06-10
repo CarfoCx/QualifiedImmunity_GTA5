@@ -132,6 +132,18 @@ namespace QualifiedImmunity
             // turn into the player getting jumped by every staged crook in the city.
             Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, _copGroup, _suspGroup);
             Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, _suspGroup, _copGroup);
+            // Crooks never target their own: a group is NEUTRAL to itself by default,
+            // so stray friendly fire flipped allied crooks into fighting each other.
+            // Also befriend the sister crook groups from the other QI systems so a
+            // mixed firefight stays crooks-vs-police. (ADD is idempotent; it just
+            // guarantees the hashes exist before wiring.)
+            OutputArgument c1 = new OutputArgument(), c2 = new OutputArgument();
+            Function.Call(Hash.ADD_RELATIONSHIP_GROUP, "QI_PURSUIT_SUSP", c1);
+            Function.Call(Hash.ADD_RELATIONSHIP_GROUP, "QI_CRIMEWATCH", c2);
+            int[] crooks = { _suspGroup, c1.GetResult<int>(), c2.GetResult<int>() };
+            foreach (int ga in crooks)
+                foreach (int gb in crooks)
+                    Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 0, ga, gb);
             _rels = true;
         }
 

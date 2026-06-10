@@ -519,6 +519,45 @@ namespace QualifiedImmunity
             return true;
         }
 
+        // ---------------------------------------------------------------
+        // Vehicle-strike trauma. A pedestrian hit by a car moving at speed
+        // goes down writhing: ~half stabilize (incapacitated on the ground
+        // until medics roll up) and the rest bleed out and die. No more
+        // bouncing off a hood at 40 and walking it off.
+        // ---------------------------------------------------------------
+        private readonly Dictionary<int, DateTime> _bleedOuts = new Dictionary<int, DateTime>();
+
+        private void ApplyPedestrianImpact(Ped victim, Vehicle car)
+        {
+            if (victim == null || !victim.Exists() || victim.IsDead) return;
+            if (car == null || !car.Exists() || car.Speed < 6f) return;      // slow bump -> they live to jaywalk again
+            if (Function.Call<bool>(Hash.IS_PED_IN_WRITHE, victim)) return;  // already down
+
+            // Hurt them to just above the death floor and put them on the ground.
+            Ped src = (car.Driver != null && car.Driver.Exists()) ? car.Driver : Game.Player.Character;
+            victim.Health = 115 + _rng.Next(15);
+            Function.Call(Hash.TASK_WRITHE, victim, src, 999999, 0, 0, 0);
+
+            if (_rng.Next(100) < 45)   // 45%: they don't make it
+                _bleedOuts[victim.Handle] = DateTime.Now.AddSeconds(10 + _rng.Next(15));
+        }
+
+        private void ProcessBleedOuts()
+        {
+            if (_bleedOuts.Count == 0) return;
+            List<int> done = null;
+            foreach (KeyValuePair<int, DateTime> kv in _bleedOuts)
+            {
+                if (DateTime.Now < kv.Value) continue;
+                Ped p = (Ped)Entity.FromHandle(kv.Key);
+                if (p != null && p.Exists() && !p.IsDead)
+                    Function.Call(Hash.SET_ENTITY_HEALTH, p, 0);   // bled out before help arrived
+                if (done == null) done = new List<int>();
+                done.Add(kv.Key);
+            }
+            if (done != null) foreach (int h in done) _bleedOuts.Remove(h);
+        }
+
         // An NPC vehicle runs a pedestrian down in view of the police -> the badges
         // treat the driver as a hostile and hunt them (a hit-and-run pursuit). This
         // also lights up nearby officers' combat, which a ride-along will then join.
@@ -527,6 +566,7 @@ namespace QualifiedImmunity
             if (!_enableWitnessedCrimeResponse) return;
             if ((DateTime.Now - _lastWitnessScan).TotalSeconds < 1.0) return; // throttle the ped sweep
             _lastWitnessScan = DateTime.Now;
+            ProcessBleedOuts();   // tick the vehicle-strike victims on the same 1s cadence
 
             foreach (Ped victim in WorldCache.GetNearbyPeds(player.Position, _copCarScanRadius))
             {
@@ -538,7 +578,13 @@ namespace QualifiedImmunity
 
                 Vehicle car = FindVehicleThatHit(victim, player);
                 Function.Call(Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY, victim); // don't re-fire on the same hit
-                if (car == null || IsPoliceVehicle(car)) continue;          // a cop running someone over is "fine"
+                if (car == null) continue;
+
+                // Struck at speed -> they go down HARD: writhing on the asphalt until
+                // medics arrive, or bleeding out. Nobody dusts off a 40mph hood slide.
+                ApplyPedestrianImpact(victim, car);
+
+                if (IsPoliceVehicle(car)) continue;          // a cop running someone over is "fine"
 
                 Ped driver = car.Driver;
                 if (!IsValidOffender(driver, player)) continue;
@@ -615,8 +661,60 @@ namespace QualifiedImmunity
         {
             bool firstOffense = !_threats.ContainsKey(offender.Handle);
             _threats[offender.Handle] = DateTime.Now;
+            if (firstOffense) AlignThreatGroup(offender);
             SicCopsOn(offender, origin, false);
             return firstOffense;
+        }
+
+        // ---------------------------------------------------------------
+        // One crook side, no infighting. Flagged civilian offenders join a
+        // shared "crime watch" relationship group for the life of the grudge:
+        // armed civilians who ganged up on the police used to stay NEUTRAL to
+        // each other, so the engine's threat reaction turned them on EACH
+        // OTHER the moment a stray round connected. Gang members keep their
+        // gang group (their gang-mates already back them up, and gang-vs-gang
+        // wars stay intact).
+        // ---------------------------------------------------------------
+        private int _crimewatchGroup;
+        private readonly Dictionary<int, int> _threatOrigGroup = new Dictionary<int, int>();
+
+        private void EnsureCrimewatchGroup()
+        {
+            if (_crimewatchGroup != 0) return;
+            OutputArgument g = new OutputArgument();
+            Function.Call(Hash.ADD_RELATIONSHIP_GROUP, "QI_CRIMEWATCH", g);
+            _crimewatchGroup = g.GetResult<int>();
+            // Companion (0) to itself; hate (5) with law enforcement both ways. The
+            // RideAlong/AmbientPolice scripts wire this group to their crook groups.
+            Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 0, _crimewatchGroup, _crimewatchGroup);
+            int cop = Function.Call<int>(Hash.GET_HASH_KEY, "COP");
+            int swat = Function.Call<int>(Hash.GET_HASH_KEY, "SWAT");
+            foreach (int law in new[] { cop, swat })
+            {
+                Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, _crimewatchGroup, law);
+                Function.Call(Hash.SET_RELATIONSHIP_BETWEEN_GROUPS, 5, law, _crimewatchGroup);
+            }
+        }
+
+        private void AlignThreatGroup(Ped offender)
+        {
+            EnsureCrimewatchGroup();
+            int cur = Function.Call<int>(Hash.GET_PED_RELATIONSHIP_GROUP_HASH, offender);
+            int civM = Function.Call<int>(Hash.GET_HASH_KEY, "CIVMALE");
+            int civF = Function.Call<int>(Hash.GET_HASH_KEY, "CIVFEMALE");
+            if (cur != civM && cur != civF) return;   // gangs/scripted peds keep their side
+            _threatOrigGroup[offender.Handle] = cur;
+            Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, offender, _crimewatchGroup);
+        }
+
+        private void RestoreThreatGroup(int h)
+        {
+            int orig;
+            if (!_threatOrigGroup.TryGetValue(h, out orig)) return;
+            _threatOrigGroup.Remove(h);
+            Ped p = (Ped)Entity.FromHandle(h);
+            if (p != null && p.Exists() && !p.IsDead)
+                Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, p, orig);
         }
 
         // Keep the badges actively hunting flagged offenders, and forget them once
@@ -645,7 +743,7 @@ namespace QualifiedImmunity
                 }
                 if (resic) SicCopsOn(offender, offender.Position, true);
             }
-            foreach (int h in expired) { _threats.Remove(h); ReleasePinnedThreat(h); }
+            foreach (int h in expired) { _threats.Remove(h); ReleasePinnedThreat(h); RestoreThreatGroup(h); }
         }
 
         // Suspects who killed ride-along officers, handed over by the RideAlong
