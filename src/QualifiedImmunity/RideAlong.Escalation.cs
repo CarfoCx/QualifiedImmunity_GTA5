@@ -55,6 +55,7 @@ namespace QualifiedImmunity
             Ped drv = v.GetPedOnSeat(VehicleSeat.Driver);
             if (Valid(drv) && !_engaged)
             {
+                SetPursuitAggression(drv);
                 Function.Call(Hash.TASK_VEHICLE_CHASE, drv, _suspect);
                 Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, drv, 18.0f);
                 Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, drv, RIDE_DRIVE_STYLE);
@@ -207,6 +208,7 @@ namespace QualifiedImmunity
             {
                 if (Valid(d))
                 {
+                    SetPursuitAggression(d);
                     Function.Call(Hash.TASK_VEHICLE_CHASE, d, _suspect);
                     Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, d, _idealFollowDistance);
                     Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, d, RIDE_DRIVE_STYLE); // avoid traffic while chasing

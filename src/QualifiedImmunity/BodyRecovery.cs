@@ -300,6 +300,9 @@ namespace QualifiedImmunity
                             Function.Call(Hash.TASK_TURN_PED_TO_FACE_ENTITY, fetch, body, 1500);
                             Function.Call(Hash.TASK_START_SCENARIO_IN_PLACE, fetch,
                                 "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true);
+                            // Pre-stream the carry-hold anim during the tending beat so it's
+                            // resident by the time the medic hoists the body (async load).
+                            Function.Call(Hash.REQUEST_ANIM_DICT, CarryAnimDict);
                             r.Stage = Stage.Tending;
                             r.Since = DateTime.Now;
                         }
@@ -428,6 +431,11 @@ namespace QualifiedImmunity
             return false;
         }
 
+        // The arms-out hold loop the medic plays while hauling the body. Upper-body
+        // flags keep the legs free, so it layers over the walk instead of replacing it.
+        private const string CarryAnimDict = "anim@heists@box_carry@";
+        private const string CarryAnimName = "idle";
+
         // Hold the corpse across the medic's arms so it visibly travels to the wagon
         // instead of blinking out where it lay. Collision off so the body doesn't drag on
         // the medic's movement; fixedRot pins the carried pose to the attach point.
@@ -435,11 +443,29 @@ namespace QualifiedImmunity
         {
             if (medic == null || !medic.Exists() || body == null || !body.Exists()) return;
             Function.Call(Hash.SET_ENTITY_COLLISION, body, false, false);
+
+            // Without a hold pose the medic strolls arms-at-sides with a corpse
+            // floating against his shins -- the "stuck to the legs" look. Layer a
+            // looping arms-out carry on the upper body (flag 49 = loop + secondary
+            // upper-body + keep control, so the walk task still drives the legs).
+            Function.Call(Hash.REQUEST_ANIM_DICT, CarryAnimDict);
+            if (Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, CarryAnimDict))
+                Function.Call(Hash.TASK_PLAY_ANIM, medic, CarryAnimDict, CarryAnimName,
+                    8.0f, -8.0f, -1, 49, 0f, false, false, false);
+
             int bone = Function.Call<int>(Hash.GET_PED_BONE_INDEX, medic, 24818); // SKEL_Spine3 (chest)
             Function.Call(Hash.ATTACH_ENTITY_TO_ENTITY, body, medic, bone,
-                0.0f, 0.42f, 0.0f,    // held out in front of the chest
+                0.0f, 0.48f, 0.05f,   // resting on the extended forearms, clear of the legs
                 0.0f, 90.0f, 0.0f,    // laid horizontally across the arms
                 false, false, false, true, 2, true);
+        }
+
+        // Drop the arms-out hold once the body is loaded (or the carry is abandoned)
+        // so the medic doesn't climb into the wagon still cradling thin air.
+        private void StopCarryAnim(Ped medic)
+        {
+            if (medic == null || !medic.Exists()) return;
+            Function.Call(Hash.STOP_ANIM_TASK, medic, CarryAnimDict, CarryAnimName, -4.0f);
         }
 
         // Just behind the ambulance, where the rear doors are -- the body is "loaded" here.

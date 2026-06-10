@@ -21,6 +21,20 @@ namespace QualifiedImmunity
         private DateTime _lastXpTick = DateTime.MinValue;
         private bool _showUnitHud = true;   // [RideAlong] ShowUnitHud
 
+        // A downed officer's monitor: the flatline holds on screen while any
+        // squadmate is still alive; once the whole unit is down it lingers a
+        // beat and then fades away.
+        private readonly Dictionary<int, DateTime> _flatlineAt = new Dictionary<int, DateTime>();
+        private const double FlatlineHoldSeconds = 5.0;
+        private const double FlatlineFadeSeconds = 2.0;
+
+        private bool AnyOfficerAlive()
+        {
+            if (_driver != null && _driver.Exists() && !_driver.IsDead) return true;
+            if (_partner != null && _partner.Exists() && !_partner.IsDead) return true;
+            return false;
+        }
+
         private const int MaxLevel = 10;
         private const int XpPerLevel = 100;
         private const int XpPerKill = 30;
@@ -122,6 +136,7 @@ namespace QualifiedImmunity
             _xp.Clear();
             _lvl.Clear();
             _xpCorpses.Clear();
+            _flatlineAt.Clear();
         }
 
         // -------------------------------------------------------------------
@@ -161,23 +176,65 @@ namespace QualifiedImmunity
         private float DrawOfficerRow(Ped c, float x, float y, float w)
         {
             if (c == null || !c.Exists()) return y;
-            const float rowH = 0.056f;
-            Rect(x + w / 2f, y + rowH / 2f, w, rowH, 0, 0, 0, 100);
 
-            string label = c.IsDead
-                ? CopNames.For(c) + "  ~r~K.I.A."
-                : CopNames.For(c) + "  ~y~Lv " + LevelOf(c);
-            DrawMenuText(label, x + 0.006f, y + 0.002f, 0.24f, 0, 235, 235, 235, false, true);
+            // Downed officer: the red flatline STAYS on the monitor as long as a
+            // squadmate is still alive and the ride is going -- a permanent reminder
+            // of the fallen. Only once the whole unit is down does the countdown
+            // start: hold the flatline a beat, then fade the row out.
+            float fade = 1f;
+            bool dead = c.IsDead;
+            if (dead)
+            {
+                DateTime at;
+                if (AnyOfficerAlive() || !_flatlineAt.TryGetValue(c.Handle, out at))
+                { at = DateTime.Now; _flatlineAt[c.Handle] = at; }
+                double s = (DateTime.Now - at).TotalSeconds;
+                if (s > FlatlineHoldSeconds + FlatlineFadeSeconds) return y;
+                if (s > FlatlineHoldSeconds)
+                    fade = 1f - (float)((s - FlatlineHoldSeconds) / FlatlineFadeSeconds);
+            }
+
+            const float rowH = 0.056f;
+            Rect(x + w / 2f, y + rowH / 2f, w, rowH, 0, 0, 0, (int)(100 * fade));
+
+            // Compact name on the left, level chip right-aligned to the box edge.
+            // (The full "Sergeant Sam \"Leadspitter\" Tucker" name ran under -- and
+            // pushed the Lv text past -- the right edge of the box.)
+            DrawMenuText(CopNames.HudFor(c), x + 0.006f, y + 0.002f, 0.24f, 0, 235, 235, 235, false, true, (int)(255 * fade));
+            if (dead)
+                DrawHudTextRight("K.I.A.", x + w - 0.006f, y + 0.002f, 0.24f, 235, 60, 60, (int)(255 * fade));
+            else
+                DrawHudTextRight("Lv " + LevelOf(c), x + w - 0.006f, y + 0.002f, 0.24f, 235, 200, 80, 255);
 
             float maxHp = Math.Max(1, c.MaxHealth);
             float hp = Math.Max(0f, Math.Min(1f, c.Health / maxHp));
-            DrawEcg(x + 0.006f, y + 0.035f, w - 0.012f, 0.010f, c, hp);
+            DrawEcg(x + 0.006f, y + 0.035f, w - 0.012f, 0.010f, c, hp, fade);
 
-            // Thin XP progress strip under the heart monitor (gold).
-            float xpFrac = LevelOf(c) >= MaxLevel ? 1f : (XpOf(c) % XpPerLevel) / (float)XpPerLevel;
-            DrawBarColored(x + 0.006f, y + 0.050f, w - 0.012f, 0.003f, xpFrac, 235, 200, 80);
+            // Thin XP progress strip under the heart monitor (gold). Pointless on
+            // a corpse, so flatline rows drop it.
+            if (!dead)
+            {
+                float xpFrac = LevelOf(c) >= MaxLevel ? 1f : (XpOf(c) % XpPerLevel) / (float)XpPerLevel;
+                DrawBarColored(x + 0.006f, y + 0.050f, w - 0.012f, 0.003f, xpFrac, 235, 200, 80);
+            }
 
             return y + rowH + 0.004f;
+        }
+
+        // Right-justified HUD text: anchored to a right edge so a chip can never
+        // spill outside its box no matter how wide the value renders.
+        private void DrawHudTextRight(string text, float rightX, float y, float scale, int r, int g, int b, int alpha)
+        {
+            Function.Call(Hash.SET_TEXT_FONT, 0);
+            Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
+            Function.Call(Hash.SET_TEXT_COLOUR, r, g, b, alpha);
+            Function.Call(Hash.SET_TEXT_DROP_SHADOW);
+            Function.Call(Hash.SET_TEXT_OUTLINE);
+            Function.Call(Hash.SET_TEXT_JUSTIFICATION, 2);      // right-justify...
+            Function.Call(Hash.SET_TEXT_WRAP, 0.0f, rightX);    // ...against this edge
+            Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
+            Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
+            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, 0.0f, y, 0);
         }
 
         // -------------------------------------------------------------------
@@ -200,41 +257,56 @@ namespace QualifiedImmunity
             return s;
         }
 
-        private void DrawEcg(float left, float cy, float w, float halfH, Ped c, float hpFrac)
+        private void DrawEcg(float left, float cy, float w, float halfH, Ped c, float hpFrac, float fade)
         {
-            Rect(left + w / 2f, cy, w, halfH * 2f + 0.003f, 0, 0, 0, 130);   // monitor backing
+            Rect(left + w / 2f, cy, w, halfH * 2f + 0.003f, 0, 0, 0, (int)(130 * fade));   // monitor backing
 
             bool dead = c.IsDead;
-            int r, g, b;
-            if (dead) { r = 230; g = 50; b = 50; }
-            else
+            int a = (int)(245 * fade);
+            if (dead)
             {
-                r = (int)(200 - 140 * hpFrac);   // green when healthy...
-                g = (int)(60 + 140 * hpFrac);    // ...red when critical
-                b = 60;
+                // FLATLINE: one unbroken bright-red line straight across the monitor.
+                Rect(left + w / 2f, cy, w, 0.0022f, 235, 45, 45, a);
+                return;
             }
 
-            int offset = 0;
-            if (!dead)
-            {
-                // Heart rate climbs as health drops: ~65 bpm healthy -> ~150 bpm critical.
-                int period = 400 + (int)(520 * hpFrac);
-                offset = (int)((long)(Game.GameTime % period) * EcgBeat.Length / period);
-            }
+            int r = (int)(200 - 140 * hpFrac);   // green when healthy...
+            int g = (int)(60 + 140 * hpFrac);    // ...red when critical
+            const int b = 60;
 
-            const int segs = 30;
+            // Heart rate climbs as health drops: ~65 bpm healthy -> ~150 bpm critical.
+            int period = 400 + (int)(520 * hpFrac);
+            float phase = (Game.GameTime % period) / (float)period;
+
+            // A CONNECTED scrolling trace: sample the beat at each column
+            // (interpolated, so the QRS spike is a clean stroke instead of stair
+            // steps) and bridge every sample to the next with a vertical segment.
+            // The old renderer drew disconnected center-anchored bars, which read
+            // as a flickering bar chart rather than a monitor line.
+            const int segs = 56;
+            const float line = 0.0018f;              // trace stroke thickness
             float segW = w / segs;
-            for (int i = 0; i < segs; i++)
+            float amp = 0.45f + 0.55f * hpFrac;      // weaker spikes as the officer fades
+            float prevY = cy - SampleEcg(phase) * amp * halfH;
+            for (int i = 1; i <= segs; i++)
             {
-                float amp = 0f;
-                if (!dead)
-                {
-                    int idx = (i * EcgBeat.Length * 2 / segs + offset) % EcgBeat.Length; // ~2 beats across the strip
-                    amp = EcgBeat[idx] * (0.35f + 0.65f * hpFrac);   // weaker spikes as they fade
-                }
-                float h = Math.Max(0.0016f, Math.Abs(amp) * halfH);
-                Rect(left + segW * (i + 0.5f), cy - amp * halfH * 0.5f, segW, h, r, g, b, 235);
+                // ~2 beats across the strip, scrolling with the phase.
+                float yv = cy - SampleEcg((float)i / segs * 2f + phase) * amp * halfH;
+                float top = Math.Min(prevY, yv);
+                float h = Math.Max(line, Math.Abs(yv - prevY));
+                Rect(left + segW * (i - 0.5f), top + h / 2f, segW * 1.15f, h, r, g, b, a);
+                prevY = yv;
             }
+        }
+
+        // The beat waveform at time t (in beats), linearly interpolated.
+        private static float SampleEcg(float t)
+        {
+            float ft = ((t % 1f) + 1f) % 1f * EcgBeat.Length;
+            int i0 = (int)ft % EcgBeat.Length;
+            int i1 = (i0 + 1) % EcgBeat.Length;
+            float fr = ft - (float)Math.Floor(ft);
+            return EcgBeat[i0] * (1f - fr) + EcgBeat[i1] * fr;
         }
 
         // Left-anchored bar: dark backing + green-to-red fill by fraction.

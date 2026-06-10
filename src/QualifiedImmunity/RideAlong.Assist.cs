@@ -19,6 +19,7 @@ namespace QualifiedImmunity
 
             _threat = threat;
             _assistEngaged = false;
+            _assistUnits = 0;                 // each engagement earns its own backup waves
             _lastReissue = DateTime.MinValue;
             _lastCarMoving = DateTime.Now;    // give the fresh drive task time to spool up
             DriveToThreat();
@@ -45,8 +46,13 @@ namespace QualifiedImmunity
                 if (!_assistEngaged)
                 {
                     _assistEngaged = true;
+                    _rideHadFight = true;   // the banter can reference the shooting now
                     CopBark(_driver, "GENERIC_WAR_CRY");
                     Notify("~r~Officer:~w~ Contact! Backing up the unit - take the threat DOWN!");
+                    // The moment OUR officers are trading fire, the assistance call
+                    // goes out -- the first unit dispatches this very tick.
+                    _lastAssistBackup = DateTime.MinValue;
+                    Notify("~r~Dispatch (radio):~w~ Unit taking fire! All nearby units, code 3 - GO!");
                 }
                 EngageThreat(_threat);
             }
@@ -62,6 +68,76 @@ namespace QualifiedImmunity
                     DriveToThreat();
                 }
             }
+
+            AssistBackupTick();
+        }
+
+        // Backup for OUR unit: while the assist firefight is live, waves of nearby
+        // units roll up fast and pile in. Spawned much closer than pursuit backup
+        // (60-120m vs 90-170m) so "responding" means seconds, not a road trip.
+        private void AssistBackupTick()
+        {
+            if (!_assistEngaged || !Valid(_threat)) return;
+
+            // Stop the surrounding traffic from stampeding while rounds are flying.
+            TrafficCalm.Sweep(_threat.Position);
+
+            if (_assistUnits < MAX_ASSIST_UNITS
+                && (DateTime.Now - _lastAssistBackup).TotalSeconds > ASSIST_BACKUP_INTERVAL_SECONDS)
+            {
+                _lastAssistBackup = DateTime.Now;
+                SpawnAssistUnit();
+            }
+
+            // Arriving units bail out and join the fight once they're on top of it.
+            foreach (Entity ent in _backupEntities)
+            {
+                Ped p = ent as Ped;
+                if (!Valid(p)) continue;
+                if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, p, 0)) continue;
+                if (p.Position.DistanceTo(_threat.Position) < 32f) CombatThreatPed(p, _threat);
+            }
+        }
+
+        // One two-officer cruiser dispatched to an "officer needs assistance" call:
+        // spawns close, drives code 3 straight at the fight, and engages on arrival
+        // (AssistBackupTick flips them to on-foot combat once they've closed in).
+        private void SpawnAssistUnit()
+        {
+            Vector3 road = FindHiddenSpawn(_threat.Position, 60f, 120f);
+            bool isCounty = _threat.Position.Y > 1500f;
+            VehicleHash cruiserHash = isCounty ? VehicleHash.Sheriff : VehicleHash.Police3;
+            PedHash copHash = isCounty ? PedHash.Sheriff01SMY : PedHash.Cop01SMY;
+
+            Vehicle v = World.CreateVehicle(new Model(cruiserHash), new Vector3(road.X, road.Y, road.Z + 2.5f));
+            if (v == null) return;
+            Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, v);
+            v.IsSirenActive = true;
+            Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, v, true, true);
+
+            Ped d = v.CreatePedOnSeat(VehicleSeat.Driver, new Model(copHash));
+            Ped g = v.CreatePedOnSeat(VehicleSeat.Passenger, new Model(copHash));
+            if (Valid(d)) Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, d, true, true);
+            if (Valid(g)) Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, g, true, true);
+            AssignCop(d);
+            AssignCop(g);
+            if (Valid(d)) RideAlongRegistry.FriendlyCops.Add(d.Handle);
+            if (Valid(g)) RideAlongRegistry.FriendlyCops.Add(g.Handle);
+
+            if (Valid(d))
+            {
+                Vector3 t = _threat.Position;
+                SetPursuitAggression(d);
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, d, v,
+                    t.X, t.Y, t.Z, 28.0f, RIDE_DRIVE_STYLE, 10.0f); // code 3: lights, speed, no red lights
+            }
+            if (Valid(g)) DriveBy(g, _threat);
+
+            _backupEntities.Add(v);
+            if (Valid(d)) _backupEntities.Add(d);
+            if (Valid(g)) _backupEntities.Add(g);
+            _assistUnits++;
+            Notify("~b~Dispatch:~w~ Unit " + (20 + _rng.Next(60)) + " rolling up to assist - hold the line!");
         }
 
         // The live threat: the current one if it's still up, otherwise the next
@@ -92,8 +168,12 @@ namespace QualifiedImmunity
         {
             if (!Valid(_driver) || !Valid(_threat) || !_driver.IsInVehicle(_copCar)) return;
             Vector3 t = _threat.Position;
+            // Code 3: sirens are on and officers are taking fire -- drive like it.
+            // (This used the lawful patrol style before, so the "responding" cruiser
+            // sat at red lights on the way to a gunfight.)
+            SetPursuitAggression(_driver);
             Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,
-                t.X, t.Y, t.Z, 22.0f, DRIVE_STYLE, 10.0f); // lawful response driving
+                t.X, t.Y, t.Z, 28.0f, RIDE_DRIVE_STYLE, 10.0f);
             if (Valid(_partner)) DriveBy(_partner, _threat);
         }
 
@@ -102,6 +182,7 @@ namespace QualifiedImmunity
             _copCar.IsSirenActive = true;
             CombatThreatPed(_driver, threat);
             CombatThreatPed(_partner, threat);
+            foreach (Ped sq in _squad) CombatThreatPed(sq, threat);   // the whole van empties
         }
 
         private void CombatThreatPed(Ped c, Ped t)
@@ -125,6 +206,7 @@ namespace QualifiedImmunity
         // unit just shrugs and goes back to patrol.
         private void BeginClearing()
         {
+            TrafficCalm.ReleaseAll();   // shooting's over -- traffic rolls again
             bool fought = _assistEngaged;
             _threat = null;
             _assistEngaged = false;
@@ -170,6 +252,7 @@ namespace QualifiedImmunity
                 _lastReboardPrompt = DateTime.Now;
                 ReboardCop(_driver, -1);
                 ReboardCop(_partner, 0);
+                ReboardSquad();
                 if (!player.IsInVehicle(_copCar))
                     Notify("~b~Dispatch:~w~ Hop back in - your unit's moving to the next call.");
             }
@@ -177,15 +260,20 @@ namespace QualifiedImmunity
                 Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
 
             // Fallback: warp a stuck officer back in so the scene-clear can never hang -- but
-            // only after giving the walk-in animation real time to play, and NEVER while
-            // the officer is actually fighting (yanking them out of combat mid-firefight
-            // is the "instantly ported into the car and gave up" bug).
+            // only after giving the walk-in animation real time to play, NEVER while the
+            // officer is actually fighting (yanking them out of combat mid-firefight is
+            // the "instantly ported into the car and gave up" bug), and NEVER while the
+            // walk-in task is live -- warping over an in-progress entry is the visible
+            // teleport. A live entry task bounds itself (20s timeout), so no hang risk.
             if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16
-                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0))
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0)
+                && !IsEnteringCruiser(_driver))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
             if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18
-                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0))
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0)
+                && !IsEnteringCruiser(_partner))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
+            if (SecondsInPhase > 20) WarpStuckSquad();
 
             // Wait out the confirm-clear pause before moving on.
             if (SecondsInPhase < _clearDelay) return;
@@ -210,7 +298,11 @@ namespace QualifiedImmunity
             {
                 // Same whole-crew rule as Regroup: never leave the partner behind.
                 if (Valid(_partner) && !_partner.IsInVehicle(_copCar)) return;
+                if (!SquadAboard()) return;
                 Notify("~g~Officer:~w~ Scene's clear. Back on patrol.");
+                // Hand the assist-backup units back to the engine -- without this they
+                // stay pinned as mission entities and pile up across engagements.
+                DespawnPursuitProps();
                 ResumePatrol();
             }
         }
@@ -228,6 +320,7 @@ namespace QualifiedImmunity
                 _lastReboardPrompt = DateTime.Now;
                 ReboardCop(_driver, -1);
                 ReboardCop(_partner, 0);
+                ReboardSquad();
                 if (!player.IsInVehicle(_copCar))
                     Notify("~b~Dispatch:~w~ Hop back in for another run - or walk away to call it.");
             }
@@ -237,13 +330,17 @@ namespace QualifiedImmunity
             // after a foot chase). With the door unlocked + police-AI off, the walk-in
             // normally finishes well before this, so the warp only fires if they're truly
             // stuck -- you see the animation, not an instant teleport. (Never warp an
-            // officer who's still mid-combat; finish the fight first.)
+            // officer who's still mid-combat, and never one whose walk-in task is live:
+            // warping over an in-progress entry IS the teleport the player keeps seeing.)
             if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16
-                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0))
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0)
+                && !IsEnteringCruiser(_driver))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
             if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18
-                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0))
+                && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0)
+                && !IsEnteringCruiser(_partner))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
+            if (SecondsInPhase > 20) WarpStuckSquad();
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.
             if (!player.IsInVehicle(_copCar))
@@ -268,6 +365,7 @@ namespace QualifiedImmunity
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
             {
                 if (Valid(_partner) && !_partner.IsInVehicle(_copCar)) return;
+                if (!SquadAboard()) return;
                 Notify("~g~Back on patrol.");
                 ResumePatrol();
             }
@@ -276,6 +374,13 @@ namespace QualifiedImmunity
         private void ReboardCop(Ped c, int seat)
         {
             if (!Valid(c) || c.IsInVehicle(_copCar)) return;
+            // Already walking to the door / climbing in? Let the animation finish.
+            // The periodic refresh used to re-issue the task on top of an entry in
+            // progress, restarting the walk-in from scratch every few seconds until
+            // the warp fallback fired -- THE "instantly ported into the cruiser" bug.
+            if (IsEnteringCruiser(c)) return;
+            // Never yank an officer who's still trading fire toward the car.
+            if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, c, 0)) return;
             // Take them off police dispatch AI first -- otherwise the game culls our
             // enter-vehicle task and the cop never actually walks in (which then trips the
             // warp fallback and looks like an instant teleport instead of an animation).
@@ -285,11 +390,51 @@ namespace QualifiedImmunity
             // Release it first so they accept the re-board. (Also re-enable vehicle use,
             // which ForceOutAndFight had turned off for the on-foot gunfight.)
             Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
+            // Releasing the KEEP_TASK lock does NOT stop the combat task already
+            // running -- and while it runs, TASK_ENTER_VEHICLE is rejected and the
+            // officer just stands at the scene until the warp "teleports" them in.
+            // Actually drop it (we're past the in-combat guard, so the fight is over).
+            Function.Call(Hash.CLEAR_PED_TASKS, c);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanUseVehicles, true);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, false);
             Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, true); // don't bail out to react
             // flag 1 = walk to the door and play the proper entry animation (not a warp).
             Function.Call(Hash.TASK_ENTER_VEHICLE, c, _copCar, 20000, seat, 2.0f, 1, 0);
+        }
+
+        // True while a scripted enter-vehicle task is live on the ped (walking to the
+        // door or playing the climb-in). 0x950B6492 = SCRIPT_TASK_ENTER_VEHICLE;
+        // GET_SCRIPT_TASK_STATUS returns 7 when no such task is assigned.
+        private bool IsEnteringCruiser(Ped c)
+        {
+            if (!Valid(c)) return false;
+            return Function.Call<int>(Hash.GET_SCRIPT_TASK_STATUS, c, unchecked((int)0x950B6492u)) != 7;
+        }
+
+        // Elite squad re-boarding: same walk-in/warp discipline as the driver and
+        // partner, each operator back to his OWN seat (never the player's).
+        private void ReboardSquad()
+        {
+            for (int i = 0; i < _squad.Count; i++) ReboardCop(_squad[i], _squadSeats[i]);
+        }
+
+        private bool SquadAboard()
+        {
+            foreach (Ped sq in _squad)
+                if (Valid(sq) && !sq.IsInVehicle(_copCar)) return false;
+            return true;
+        }
+
+        private void WarpStuckSquad()
+        {
+            for (int i = 0; i < _squad.Count; i++)
+            {
+                Ped sq = _squad[i];
+                if (!Valid(sq) || sq.IsInVehicle(_copCar)) continue;
+                if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, sq, 0)) continue;
+                if (IsEnteringCruiser(sq)) continue;
+                Function.Call(Hash.SET_PED_INTO_VEHICLE, sq, _copCar, _squadSeats[i]);
+            }
         }
 
         private void BefriendRidealongCops()
@@ -298,6 +443,8 @@ namespace QualifiedImmunity
             int grp = Function.Call<int>(Hash.GET_PED_RELATIONSHIP_GROUP_HASH, Game.Player.Character);
             if (Valid(_driver)) Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, _driver, grp);
             if (Valid(_partner)) Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, _partner, grp);
+            foreach (Ped sq in _squad)
+                if (Valid(sq)) Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, sq, grp);
         }
 
         private void EndSirens()

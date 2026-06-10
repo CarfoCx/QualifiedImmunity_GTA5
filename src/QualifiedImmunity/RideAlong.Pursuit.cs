@@ -72,6 +72,7 @@ namespace QualifiedImmunity
             Function.Call(Hash.TASK_VEHICLE_CHASE, _driver, _suspect);
             Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, _driver, _idealFollowDistance);
             Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE); // avoid traffic while chasing
+            SetPursuitAggression(_driver);   // run lights / push traffic, not patrol manners
             if (Valid(_partner)) DriveBy(_partner, _suspect);
 
             _engaged = false;
@@ -91,6 +92,7 @@ namespace QualifiedImmunity
             _lastPursuitStart = DateTime.Now; // track UI timer
 
             CopBark(_driver, "GENERIC_WAR_CRY"); // a single voiced bark, no extra ticker line
+            _rideHadPursuit = true;              // the banter can reference the chase now
             SetPhase(Phase.Pursuit);
             return true;
         }
@@ -144,12 +146,27 @@ namespace QualifiedImmunity
 
         private void PursuitTick()
         {
+            // While the on-foot firefight is live, keep surrounding traffic from
+            // stampeding -- distant drivers stop and wait it out (TrafficCalm);
+            // only cars right next to the muzzle flash get to panic for real.
+            if (_engaged)
+            {
+                Ped fightCenter = AliveSuspect();
+                if (fightCenter != null) TrafficCalm.Sweep(fightCenter.Position);
+            }
+
             // TASK_VEHICLE_CHASE swaps driving subtasks as it runs (pursue/ram/block),
             // and a one-shot SET_DRIVE_TASK_DRIVING_STYLE gets dropped on the swap --
             // the driver then reverts to the sticky law-abiding patrol style and SITS
-            // AT RED LIGHTS mid-pursuit. Re-assert the pursuit style every tick.
+            // AT RED LIGHTS mid-pursuit. Re-assert the pursuit style every tick --
+            // AND the aggression: the chase AI throttles its traffic/red-light
+            // manners off driver aggressiveness, so the calm patrol value (0.3)
+            // had the cruiser politely obeying traffic laws mid-chase.
             if (!_engaged && Valid(_driver) && Valid(_copCar) && _driver.IsInVehicle(_copCar))
+            {
                 Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE);
+                SetPursuitAggression(_driver);
+            }
 
             // Keep the chase locked onto a LIVE suspect. If the designated suspect dies but
             // others are still running (multi-suspect / gang pursuits), re-point at one that's
@@ -292,8 +309,10 @@ namespace QualifiedImmunity
             CopBark(_driver, "GENERIC_WAR_CRY");
             CopBark(_partner, "GENERIC_INSULT_HIGH");
             _pitting = false;
+            _rideHadFight = true;   // the banter can reference the shooting now
             ForceOutAndFight(_driver);
             ForceOutAndFight(_partner);
+            foreach (Ped sq in _squad) if (Valid(sq)) ForceOutAndFight(sq);   // the whole van empties
             foreach (Entity ent in _backupEntities) { Ped p = ent as Ped; if (Valid(p)) ForceOutAndFight(p); }
 
             // The suspects respond: armed crews fight back, innocents run for their lives.
@@ -611,6 +630,7 @@ namespace QualifiedImmunity
             }
 
             _engaged = true;
+            _rideHadFight = true; _rideHadPursuit = true;
             ForceOutAndFight(_driver);
             ForceOutAndFight(_partner);
 
@@ -632,14 +652,16 @@ namespace QualifiedImmunity
         // -------------------------------------------------------------------
         // Post-pursuit scene wrap-up: real officers don't shrug and drive off.
         // The cruiser parks (lights stay on -- it's a scene now), one officer
-        // covers while the other approaches the downed suspect and works the
-        // body (cuff/inspect), the scene holds a beat, and only THEN does the
+        // covers while the other approaches the downed suspect, "arrests" the
+        // body, kneels to attempt first aid, and then discovers why aid is
+        // sadly impossible. The scene holds a beat, and only THEN does the
         // unit regroup and roll out. Suspect bodies aren't despawned until
         // Regroup, so BodyRecovery's ambulance often arrives mid-scene.
         // -------------------------------------------------------------------
         private void BeginWrapup()
         {
             _engaged = false;   // release the D-pad pursuit commands
+            TrafficCalm.ReleaseAll();   // shooting's over -- traffic rolls again
 
             // Find a body to work: prefer one on the ground over one still in a car.
             _wrapBody = null;
@@ -687,31 +709,51 @@ namespace QualifiedImmunity
                     _wrapStage = 1; _wrapStageAt = DateTime.Now;
                     break;
 
-                case 1: // reached the body (or took too long) -> cuff/inspect beat
+                case 1: // reached the body (or took too long) -> the "arrest"
                     if (lead.Position.DistanceTo(_wrapBody.Position) < 2.2f || inStage > 10)
                     {
                         if (!_wrapBody.IsDead)
                         {
+                            // Still breathing -> an actual arrest; no aid theater needed.
                             Function.Call(Hash.TASK_ARREST_PED, lead, _wrapBody);
                             Notify("~b~" + CopNames.For(lead) + ":~w~ You're under arrest for surviving!");
+                            _wrapStage = 4; _wrapStageAt = DateTime.Now;
                         }
                         else
                         {
+                            // Dead -> arrest him anyway. Procedure is procedure.
                             Function.Call(Hash.TASK_TURN_PED_TO_FACE_ENTITY, lead, _wrapBody, 1200);
-                            Function.Call(Hash.TASK_START_SCENARIO_IN_PLACE, lead,
-                                "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true);
-                            Notify("~b~" + CopNames.For(lead) + ":~w~ Yep. He's done resisting.");
+                            Notify("~b~" + CopNames.For(lead) + ":~w~ You're under arrest! Dispatch, be advised: suspect is complying beautifully.");
+                            _wrapStage = 2; _wrapStageAt = DateTime.Now;
                         }
-                        _wrapStage = 2; _wrapStageAt = DateTime.Now;
                     }
                     break;
 
-                case 2: // hold the scene a beat, then wrap and regroup
-                    if (inStage > 9) FinishWrapup();
+                case 2: // a beat after the cuffs -> kneel and "attempt" first aid
+                    if (inStage > 2.5)
+                    {
+                        Function.Call(Hash.TASK_START_SCENARIO_IN_PLACE, lead,
+                            "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true);
+                        Notify("~b~" + CopNames.For(lead) + ":~w~ Hang in there, buddy! Initiating life-saving measures!");
+                        _wrapStage = 3; _wrapStageAt = DateTime.Now;
+                    }
+                    break;
+
+                case 3: // ...and the aid attempt immediately runs into an excuse
+                    if (inStage > 5)
+                    {
+                        Notify("~y~" + CopNames.For(lead) + ":~w~ " + AidExcuses[_rng.Next(AidExcuses.Length)]);
+                        CopBark(lead, "GENERIC_SHOCKED_MED");
+                        _wrapStage = 4; _wrapStageAt = DateTime.Now;
+                    }
+                    break;
+
+                case 4: // hold the scene a beat, then wrap and regroup
+                    if (inStage > 7) FinishWrapup();
                     break;
             }
 
-            if (SecondsInPhase > 40) FinishWrapup();   // hard safety cap
+            if (SecondsInPhase > 45) FinishWrapup();   // hard safety cap
         }
 
         // Take an officer off the driving/combat locks so the scene tasks apply:
@@ -747,6 +789,7 @@ namespace QualifiedImmunity
             }
             _backupEntities.Clear();
             _backupCount = 0;
+            _assistUnits = 0;
             // Release designated suspects back to the engine (they're existing peds).
             foreach (Ped s in _suspectPeds) { if (Valid(s)) { Function.Call(Hash.SET_PED_KEEP_TASK, s, false); s.MarkAsNoLongerNeeded(); } }
             _suspectPeds.Clear();
