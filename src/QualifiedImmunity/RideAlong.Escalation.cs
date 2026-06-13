@@ -137,10 +137,12 @@ namespace QualifiedImmunity
         // Drop the helicopter and its crew (used on pursuit end + ride-along end).
         private void ReleaseHeli()
         {
-            if (_heliPilot != null && _heliPilot.Exists())
-            { RideAlongRegistry.FriendlyCops.Remove(_heliPilot.Handle); CopNames.Forget(_heliPilot.Handle); _heliPilot.MarkAsNoLongerNeeded(); }
-            if (_heliGunner != null && _heliGunner.Exists())
-            { RideAlongRegistry.FriendlyCops.Remove(_heliGunner.Handle); CopNames.Forget(_heliGunner.Handle); _heliGunner.MarkAsNoLongerNeeded(); }
+            // Bookkeeping removed unconditionally (stale handles poison recycled peds);
+            // the entity itself is only released if it still exists.
+            if (_heliPilot != null)
+            { RideAlongRegistry.FriendlyCops.Remove(_heliPilot.Handle); CopNames.Forget(_heliPilot.Handle); if (_heliPilot.Exists()) _heliPilot.MarkAsNoLongerNeeded(); }
+            if (_heliGunner != null)
+            { RideAlongRegistry.FriendlyCops.Remove(_heliGunner.Handle); CopNames.Forget(_heliGunner.Handle); if (_heliGunner.Exists()) _heliGunner.MarkAsNoLongerNeeded(); }
             if (_heli != null && _heli.Exists()) _heli.MarkAsNoLongerNeeded();
             _heli = null; _heliPilot = null; _heliGunner = null;
         }

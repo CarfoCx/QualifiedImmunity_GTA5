@@ -22,6 +22,7 @@ namespace QualifiedImmunity
         private Vector3 _heliCamPos = Vector3.Zero;   // last camera position (for telemetry)
         private bool _feedEnding;                     // pursuit over -> wind-down banner, player exits
         private DateTime _feedEndingSince = DateTime.MinValue;
+        private int _camToggleFrame = -1;             // frame the feed was last toggled (same-frame guard)
         private const double FeedWindDownSeconds = 30.0;  // auto-close safety
 
         private static readonly string[] OpticsLong = { "EO / DAYLIGHT", "NIGHT-VISION", "THERMAL / IR" };
@@ -29,6 +30,9 @@ namespace QualifiedImmunity
 
         private void ToggleNewsChopperCamera()
         {
+            // Stamp the toggle so HeliFeedTick ignores the SAME just-pressed input
+            // this frame (the press that opened the feed must not also close it).
+            _camToggleFrame = Function.Call<int>(Hash.GET_FRAME_COUNT);
             if (_newsCam != null)
             {
                 StopNewsCam();
@@ -88,12 +92,16 @@ namespace QualifiedImmunity
             UpdateHeliCam();
             DrawHeliCamHud();
 
-            if (!_phoneOpen)
+            if (!_phoneOpen && Function.Call<int>(Hash.GET_FRAME_COUNT) != _camToggleFrame)
             {
-                if (Game.IsControlJustPressed(GTA.Control.PhoneLeft)) { ToggleNewsChopperCamera(); return; }
-                if (Game.IsControlJustPressed(GTA.Control.PhoneUp)) HeliCamZoomStep(+1);
-                if (Game.IsControlJustPressed(GTA.Control.PhoneDown)) HeliCamZoomStep(-1);
-                if (Game.IsControlJustPressed(GTA.Control.PhoneRight)) HeliCamCycleOptics();
+                // The D-pad drives the camera while the feed is up -- keep the same
+                // presses from also opening the radio wheel or raising the cellphone.
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)GTA.Control.VehicleRadioWheel, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)GTA.Control.Phone, true);
+                if (DpadJustPressed(GTA.Control.PhoneLeft)) { ToggleNewsChopperCamera(); return; }
+                if (DpadJustPressed(GTA.Control.PhoneUp)) HeliCamZoomStep(+1);
+                if (DpadJustPressed(GTA.Control.PhoneDown)) HeliCamZoomStep(-1);
+                if (DpadJustPressed(GTA.Control.PhoneRight)) HeliCamCycleOptics();
             }
 
             if (_feedEnding)

@@ -102,6 +102,9 @@ namespace QualifiedImmunity
                 Ped d = v.Driver;
                 if (d == null || !d.Exists() || d.IsDead || d == player) continue;
                 if (Cops.IsCop(d)) continue;
+                // Never designate emergency services -- this is how a pursuit ended up
+                // arming BodyRecovery's own ambulance crew and chasing the meat wagon.
+                if (d.PedType == PedType.Medic || d.PedType == PedType.Fire) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(d.Handle)) continue;
 
                 float dist = v.Position.DistanceTo(pos);

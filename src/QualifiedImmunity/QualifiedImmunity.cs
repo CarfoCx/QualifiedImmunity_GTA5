@@ -125,7 +125,22 @@ namespace QualifiedImmunity
             LoadConfig();
             Tick += OnTick;
             KeyDown += OnKeyDown;
+            Aborted += OnAborted;
             Interval = 200; // run ~5x/sec; cheap and responsive enough
+        }
+
+        private void OnAborted(object sender, EventArgs e)
+        {
+            // Hand mission-pinned cop killers back to the engine (a pinned ped is
+            // never culled, so leaking these on a script reload strands them forever)
+            // and put flagged civilians back in their original relationship group.
+            foreach (int h in _pinnedThreats)
+            {
+                Ped p = (Ped)Entity.FromHandle(h);
+                if (p != null && p.Exists()) p.MarkAsNoLongerNeeded();
+            }
+            _pinnedThreats.Clear();
+            foreach (int h in new List<int>(_threatOrigGroup.Keys)) RestoreThreatGroup(h);
         }
 
         private void LoadConfig()
@@ -1043,6 +1058,9 @@ namespace QualifiedImmunity
                 if (drv == null || !drv.Exists() || drv.IsDead) continue;
                 if (drv == Game.Player.Character || IsCop(drv)) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(drv.Handle)) continue;
+                // Suspects aren't panicking bystanders: curb-parking (or bailing) the
+                // pursuit's own getaway driver killed the chase it was fleeing from.
+                if (TrafficCalm.IsCrook(drv)) continue;
                 if (_panicHandled.Contains(drv.Handle)) continue;
                 _panicHandled.Add(drv.Handle);
 
@@ -1222,7 +1240,9 @@ namespace QualifiedImmunity
                 Ped ped = (Ped)Entity.FromHandle(kv.Key);
                 if (ped == null || !ped.Exists() || ped.IsDead) goneThreats.Add(kv.Key);
             }
-            foreach (int h in goneThreats) { _threats.Remove(h); ReleasePinnedThreat(h); }
+            // RestoreThreatGroup also drops the saved-group entry, so dead threats
+            // don't leak _threatOrigGroup records forever.
+            foreach (int h in goneThreats) { _threats.Remove(h); ReleasePinnedThreat(h); RestoreThreatGroup(h); }
         }
 
         // Remove handles whose peds are dead or despawned from a tracking set.

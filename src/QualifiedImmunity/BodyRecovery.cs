@@ -259,6 +259,7 @@ namespace QualifiedImmunity
                     {
                         Function.Call(Hash.DETACH_ENTITY, body, true, true);
                         Function.Call(Hash.SET_ENTITY_COLLISION, body, true, true);
+                        StopCarryAnim(Valid(r.Attendant) ? r.Attendant : r.Driver);
                     }
                     ReleaseCrew(r);
                     _jobs.RemoveAt(i);
@@ -338,6 +339,7 @@ namespace QualifiedImmunity
                         if (fetch.Position.DistanceTo(rear) < 2.2f || secs > 16)
                         {
                             if (body != null && body.Exists()) Function.Call(Hash.DETACH_ENTITY, body, true, true);
+                            StopCarryAnim(fetch);                         // drop the arms-out hold
                             RemoveBody(r.Body);                           // body goes into the back
                             if (_emsNotifications)
                                 GTA.UI.Notification.PostTicker("~b~EMS:~w~ Body recovered.", false);

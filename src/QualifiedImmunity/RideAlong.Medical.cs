@@ -46,6 +46,58 @@ namespace QualifiedImmunity
             return best;
         }
 
+        // -------------------------------------------------------------------
+        // Downed-officer window. Ride-along officers are set DiesWhenInjured=false
+        // (MakeOfficerDownable), so a fatal hit drops them into a bleeding-out injured
+        // state and keeps them ALIVE there instead of killing them. This tick gives
+        // that state structure: alert the player, hold the officer stable (invincible
+        // while down, so ongoing fire can't finish him) for a generous window, and only
+        // let him bleed out for real if nobody applies a tourniquet in time.
+        // -------------------------------------------------------------------
+        private readonly System.Collections.Generic.Dictionary<int, DateTime> _downedSince =
+            new System.Collections.Generic.Dictionary<int, DateTime>();
+        private DateTime _lastDownedAlert = DateTime.MinValue;
+        private const double BleedOutSeconds = 60.0;   // time to reach a downed officer before he's gone
+
+        private void DownedOfficerTick()
+        {
+            foreach (Ped c in UnitOfficers())
+            {
+                if (c == null || !c.Exists()) continue;
+                int h = c.Handle;
+                if (c.IsDead) { _downedSince.Remove(h); continue; }
+
+                if (c.IsInjured)   // injured-but-alive == bleeding out and savable
+                {
+                    DateTime since;
+                    if (!_downedSince.TryGetValue(h, out since))
+                    {
+                        // Just went down: freeze him stable so he can't be finished, and
+                        // sound the alarm so the player knows to run over with the kit.
+                        _downedSince[h] = DateTime.Now;
+                        Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
+                        Function.Call(Hash.SET_ENTITY_INVINCIBLE, c, true);   // protect the save window
+                        if ((DateTime.Now - _lastDownedAlert).TotalSeconds > 5.0)
+                        {
+                            _lastDownedAlert = DateTime.Now;
+                            Notify("~r~OFFICER DOWN!~w~ " + CopNames.For(c) + " is hit -- reach them and apply a ~b~tourniquet~w~ before they bleed out.");
+                            Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, "Beep_Red", "DLC_HEIST_HACKING_SNAKE_SOUNDS", true);
+                        }
+                    }
+                    else if ((DateTime.Now - since).TotalSeconds > BleedOutSeconds)
+                    {
+                        // Nobody got to him in time -> he bleeds out for real.
+                        _downedSince.Remove(h);
+                        Function.Call(Hash.SET_ENTITY_INVINCIBLE, c, false);
+                        Function.Call(Hash.SET_PED_DIES_WHEN_INJURED, c, true);
+                        Function.Call(Hash.SET_ENTITY_HEALTH, c, 0);
+                        Notify("~r~" + CopNames.For(c) + " bled out. Couldn't reach them in time.");
+                    }
+                }
+                else _downedSince.Remove(h);   // healed and back up
+            }
+        }
+
         private void ApplyTourniquet(Ped player, Ped cop)
         {
             // Brief first-aid gesture; guarded so a missing anim never breaks anything.
@@ -57,6 +109,9 @@ namespace QualifiedImmunity
             }
             catch { /* cosmetic only */ }
 
+            // Lift the downed-state protection and patch them back up to full.
+            _downedSince.Remove(cop.Handle);
+            Function.Call(Hash.SET_ENTITY_INVINCIBLE, cop, false);
             int target = cop.MaxHealth > 100 ? cop.MaxHealth : 200;
             Function.Call(Hash.SET_ENTITY_HEALTH, cop, target);
             Function.Call(Hash.CLEAR_PED_BLOOD_DAMAGE, cop);

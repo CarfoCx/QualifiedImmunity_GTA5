@@ -535,9 +535,11 @@ namespace QualifiedImmunity
 
         private void Free(Ped p)
         {
-            if (p == null || !p.Exists()) return;
+            if (p == null) return;
+            // Remove the handle even if the ped despawned -- a stale registry entry
+            // would mark whatever ped the engine recycles the handle onto as friendly.
             RideAlongRegistry.FriendlyCops.Remove(p.Handle);
-            p.MarkAsNoLongerNeeded();   // dead ones stay for BodyRecovery; live ones go ambient
+            if (p.Exists()) p.MarkAsNoLongerNeeded();   // dead ones stay for BodyRecovery; live ones go ambient
         }
 
         // -------------------------------------------------------------------

@@ -8,11 +8,14 @@ namespace QualifiedImmunity
     public partial class RideAlong
     {
         // -------------------------------------------------------------------
-        // Officer XP / levels -- per ride. Shooting and kills earn XP; levels
-        // sharpen aim, decision-making (combat ability), cover/flank habits and
-        // survivability. RANK (and the gear that comes with it) stays exactly as
-        // rolled by CopNames -- you still draw a green Officer or a grizzled
-        // Captain at random; levels are how THIS officer grows on THIS shift.
+        // Officer XP / RANKS -- per ride. Shooting and kills earn XP; every level
+        // is a PROMOTION up the real police ladder: everyone starts a rookie
+        // Officer (Lv 1) and climbs Corporal, Sergeant, Lieutenant, Captain ... to
+        // SHERIFF (Lv 10). Each rank sharpens accuracy, ego (combat ability),
+        // tactics (cover/strafe/flank habits) and ARMAMENTS (a heavier primary),
+        // and the officer's shown title updates to match -- but HP never changes
+        // (rank is competence + firepower, not survivability). The rank ladder and
+        // its stats/gear live in CopNames; the tactics layer is ApplyRankTactics.
         // Plus a unit HUD: name + level, HP/XP bars, and cruiser health.
         // -------------------------------------------------------------------
         private readonly Dictionary<int, int> _xp = new Dictionary<int, int>();
@@ -30,12 +33,13 @@ namespace QualifiedImmunity
 
         private bool AnyOfficerAlive()
         {
-            if (_driver != null && _driver.Exists() && !_driver.IsDead) return true;
-            if (_partner != null && _partner.Exists() && !_partner.IsDead) return true;
+            foreach (Ped c in UnitOfficers())
+                if (c != null && c.Exists() && !c.IsDead) return true;
             return false;
         }
 
-        private const int MaxLevel = 10;
+        // One level per rank in the ladder, so Level 1 = Officer ... top level = Sheriff.
+        private static readonly int MaxLevel = CopNames.MaxRankLevel;
         private const int XpPerLevel = 100;
         private const int XpPerKill = 30;
         private const int XpPerShootTick = 4;   // per second spent actually firing
@@ -45,8 +49,7 @@ namespace QualifiedImmunity
             if ((DateTime.Now - _lastXpTick).TotalSeconds < 1.0) return;
             _lastXpTick = DateTime.Now;
 
-            AwardShootingXp(_driver);
-            AwardShootingXp(_partner);
+            foreach (Ped c in UnitOfficers()) AwardShootingXp(c);
             AwardKillXp();
         }
 
@@ -67,10 +70,11 @@ namespace QualifiedImmunity
                 if (_xpCorpses.Contains(p.Handle)) continue;
 
                 Ped killer = null;
-                if (Valid(_driver) && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, p, _driver, true))
-                    killer = _driver;
-                else if (Valid(_partner) && Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, p, _partner, true))
-                    killer = _partner;
+                foreach (Ped c in UnitOfficers())
+                {
+                    if (!Valid(c)) continue;
+                    if (Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, p, c, true)) { killer = c; break; }
+                }
                 if (killer == null) continue;
 
                 _xpCorpses.Add(p.Handle);
@@ -93,28 +97,32 @@ namespace QualifiedImmunity
             if (newLvl > oldLvl)
             {
                 _lvl[h] = newLvl;
-                ApplyLevelPerks(c, newLvl);
+                // A level-up IS a promotion: it advances the officer's RANK (Officer ->
+                // Corporal -> ... -> Sheriff), which sharpens accuracy, ego, and armament,
+                // and re-titles them. Tactics (cover/strafe/flank habits) are layered on
+                // here. None of it touches HP -- rank never buys raw survivability.
+                bool promoted = CopNames.PromoteTo(c, newLvl - 1);
+                ApplyRankTactics(c, newLvl);
                 Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, "RANK_UP", "HUD_AWARDS_SOUNDSET", true);
-                Notify("~g~LEVEL UP!~w~ " + CopNames.For(c) + " hit ~y~Level " + newLvl + "~w~ (+aim, +grit, +ego).");
+                if (promoted)
+                    Notify("~g~PROMOTION!~w~ " + CopNames.HudFor(c) + " is now a ~y~" + CopNames.TitleOf(c) + "~w~ (Lv " + newLvl + ").");
+                else
+                    Notify("~g~LEVEL UP!~w~ " + CopNames.HudFor(c) + " reached ~y~Level " + newLvl + "~w~ (+aim, +ego, +arms).");
             }
             else if (!_lvl.ContainsKey(h)) _lvl[h] = oldLvl;
         }
 
-        // Levels sharpen the officer WITHOUT touching the rolled rank/equipment:
-        // tighter aim on top of the rank's base, professional decision-making,
-        // better cover/strafe/flank habits, and a survival patch-up per level.
-        private void ApplyLevelPerks(Ped c, int lvl)
+        // The "tactics" half of a promotion: better habits in a fight (the accuracy,
+        // ego/combat-ability and armament half lives in CopNames.PromoteTo). Strictly
+        // no HP/armour here -- ranking up never makes an officer tougher to kill.
+        private void ApplyRankTactics(Ped c, int lvl)
         {
             if (!Valid(c)) return;
-            int acc = Math.Min(100, CopNames.BaseAccuracy(c) + (lvl - 1) * 4);
-            Function.Call(Hash.SET_PED_ACCURACY, c, acc);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_AlwaysFight, true);
             if (lvl >= 2) Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanUseCover, true);
-            if (lvl >= 3) Function.Call(Hash.SET_PED_COMBAT_ABILITY, c, 2);      // professional
+            if (lvl >= 3) Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, c, 2);   // advance, don't cower
             if (lvl >= 4) Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_UseDynamicStrafe, true);
-            if (lvl >= 5) Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanFlank, true);
-            int armour = Function.Call<int>(Hash.GET_PED_ARMOUR, c);
-            Function.Call(Hash.SET_PED_ARMOUR, c, Math.Min(100, armour + 10));
-            Function.Call(Hash.SET_ENTITY_HEALTH, c, c.MaxHealth);
+            if (lvl >= 6) Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanFlank, true);
         }
 
         private int LevelOf(Ped c)
@@ -149,28 +157,47 @@ namespace QualifiedImmunity
             if (_newsCam != null) return;
             if (!Valid(_copCar)) return;
 
-            // Tucked off to the side (bottom right) and less prominent
+            // Tucked off to the side (bottom right) and less prominent. The panel's
+            // BOTTOM edge is the anchor: elite calls (NOOSE van, FIB Granger -- incl.
+            // the operators hanging off its sides) run up to seven officers deep, so
+            // the list grows UPWARD instead of running off the bottom of the screen.
+            // (With the usual two-man car this lands at the same y = 0.74 as before.)
             const float x = 0.850f, w = 0.140f;
-            float y = 0.74f;
+            int rows = 0;
+            foreach (Ped c in UnitOfficers()) if (OfficerRowVisible(c)) rows++;
+            float y = 0.932f - 0.038f - rows * 0.060f - 0.034f;
 
             // Regular cruisers are pinned to livery 0 at spawn (SpawnUnit), whose roof
             // decal reads 32 -- so the HUD callsign matches the number on the roof.
             string title = _eliteUnit == 1 ? "NOOSE UNIT"
                          : _eliteUnit == 2 ? "FIB UNIT"
                          : _eliteUnit == 3 ? "AGENCY UNIT"
-                         : _undercover ? "UNMARKED" : "UNIT 32";
+                         : _undercover ? "UNMARKED"
+                         : _usesRoster ? _unitHud : "UNIT 32";
             Rect(x + w / 2f, y + 0.015f, w, 0.030f, 12, 28, 56, 160);
             DrawMenuText(title, x + 0.006f, y + 0.003f, 0.28f, 4, 235, 235, 235, false, true);
             y += 0.034f;
 
-            y = DrawOfficerRow(_driver, x, y, w);
-            y = DrawOfficerRow(_partner, x, y, w);
+            foreach (Ped c in UnitOfficers())
+                y = DrawOfficerRow(c, x, y, w);
 
             // Cruiser body health (entity health, 0-1000).
             float vh = Math.Max(0f, Math.Min(1f, _copCar.Health / 1000f));
             Rect(x + w / 2f, y + 0.019f, w, 0.038f, 0, 0, 0, 100);
             DrawMenuText("CRUISER", x + 0.006f, y + 0.002f, 0.24f, 0, 215, 215, 215, false, true);
             DrawBar(x + 0.006f, y + 0.030f, w - 0.012f, 0.006f, vh);
+        }
+
+        // Mirrors DrawOfficerRow's early-outs so the bottom-anchored panel can
+        // count its rows before drawing: alive rows always show; flatline rows
+        // show until their hold+fade window has fully elapsed.
+        private bool OfficerRowVisible(Ped c)
+        {
+            if (c == null || !c.Exists()) return false;
+            if (!c.IsDead) return true;
+            DateTime at;
+            if (AnyOfficerAlive() || !_flatlineAt.TryGetValue(c.Handle, out at)) return true;
+            return (DateTime.Now - at).TotalSeconds <= FlatlineHoldSeconds + FlatlineFadeSeconds;
         }
 
         private float DrawOfficerRow(Ped c, float x, float y, float w)

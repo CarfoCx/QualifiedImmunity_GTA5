@@ -22,6 +22,27 @@ namespace QualifiedImmunity
         private static readonly HashSet<int> Calmed = new HashSet<int>();
         private static DateTime _lastSweep = DateTime.MinValue;
 
+        // The mod's own crook groups (relationship-group hash == joaat of the name).
+        // Suspects are combatants, not bystanders: becalming the threat-3 backup
+        // crew's car mid-firefight froze the script's own antagonists in place.
+        // Public because PanicTraffic (QualifiedImmunity.cs) needs the same check --
+        // panic-tasking the getaway driver to pull over at the curb killed pursuits.
+        private static int[] _crookGroups;
+
+        public static bool IsCrook(Ped p)
+        {
+            if (_crookGroups == null)
+                _crookGroups = new[]
+                {
+                    Function.Call<int>(Hash.GET_HASH_KEY, "QI_PURSUIT_SUSP"),
+                    Function.Call<int>(Hash.GET_HASH_KEY, "QI_AMB_CROOKS"),
+                    Function.Call<int>(Hash.GET_HASH_KEY, "QI_CRIMEWATCH")
+                };
+            int grp = Function.Call<int>(Hash.GET_PED_RELATIONSHIP_GROUP_HASH, p);
+            foreach (int g in _crookGroups) if (grp == g) return true;
+            return false;
+        }
+
         // Call every tick while a firefight is live; internally throttled.
         public static void Sweep(Vector3 fightAt)
         {
@@ -36,6 +57,7 @@ namespace QualifiedImmunity
                 if (drv == null || !drv.Exists() || drv.IsDead || drv == player) continue;
                 if (RideAlongRegistry.FriendlyCops.Contains(drv.Handle)) continue;
                 if (Calmed.Contains(drv.Handle)) continue;
+                if (IsCrook(drv)) continue;   // never becalm the suspects themselves
                 if (drv.Position.DistanceTo(fightAt) < PanicRadius) continue;
 
                 Calmed.Add(drv.Handle);

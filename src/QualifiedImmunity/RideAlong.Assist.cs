@@ -348,12 +348,25 @@ namespace QualifiedImmunity
                 // Keep the doors enterable (police cars re-lock for the player) so stepping
                 // out mid-ride never traps you outside a "locked" cruiser.
                 LockCarForRide();
-                // Hold the car so it waits for you instead of driving off and stranding you.
+                // Hold the car so it WAITS for you instead of driving off and stranding you.
                 if (Valid(_driver) && _driver.IsInVehicle(_copCar) && _copCar.Speed > 1f)
                     Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000);
-                // End only if you actually walk away (more time/room than before so a
-                // fumble at the door doesn't cancel the ride).
-                if (_copCar.Position.DistanceTo(player.Position) > 45f || SecondsInPhase > 60)
+
+                float gap = _copCar.Position.DistanceTo(player.Position);
+                // Stepped out to watch the cops work? That's fine -- the unit holds for
+                // you. Prompt you back in whenever you're near the car, and DON'T end the
+                // ride on a short timer (the old 60s/45m cutoff is what made it "refuse to
+                // let me back in" after I walked over to see what was happening). The ride
+                // only ends if you genuinely leave the scene (wander well clear of the car)
+                // or after a long grace with you nowhere near it.
+                if (gap < 7f)
+                    ShowHelp("Press ~INPUT_ENTER~ to get back in and continue the ride-along.");
+                else if (SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 9.0)
+                    Notify("~b~Dispatch:~w~ Your unit's holding for you - walk back and get in (" + SeatName(_playerSeat) + ").");
+
+                bool walkedOff = gap > 70f;                         // clearly left the scene
+                bool idledOut  = gap > 25f && SecondsInPhase > 240;  // away from the car for 4 min
+                if (walkedOff || idledOut)
                 { Notify("~y~Ride-along ended."); Cleanup(); }
                 return;
             }

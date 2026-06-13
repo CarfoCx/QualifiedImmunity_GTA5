@@ -57,6 +57,15 @@ namespace QualifiedImmunity
         private bool _undercover;
         private Vector3 _ucScene = Vector3.Zero;   // where the deal is staged
 
+        // Which numbered patrol unit this ride is (UnitRoster). A regular ride draws one
+        // of several real cruiser MODELS, each a distinct, persistent unit with its own
+        // callsign + named crew -- so "UNIT 32" is always the same officers (until they
+        // die and get replaced), and you no longer get a fleet of identical "32"s.
+        private bool _usesRoster;     // false for elite/undercover (they keep their own designation)
+        private int _unitNumber;      // the roster key for this ride's unit
+        private string _unitHud = "UNIT 32";   // HUD callsign for this unit
+        private int _lastUnitNumber = -1;       // avoid drawing the same unit twice in a row
+
         // Unit-downed recovery state.
         private int _replacementsUsed;
 
@@ -327,6 +336,15 @@ namespace QualifiedImmunity
         // FLEE style for suspects: the old, sloppier avoidance set. Fleeing perps
         // are SUPPOSED to clip mirrors and eat fences; the precision is for cops.
         private const int FLEE_DRIVE_STYLE = 786468;
+
+        // Hard speed CAP for our cruisers during a pursuit (m/s; ~40 m/s ~= 90 mph).
+        // TASK_VEHICLE_CHASE has no speed argument and otherwise drives flat-out, so
+        // on a straightaway the cruiser would build up far too much speed and then
+        // plow into the first corner/parked car/fence -- the "cops crash constantly
+        // with lights and sirens on" complaint. Capping the chase keeps them fast
+        // enough to stay on the suspect's bumper through traffic without the
+        // uncontrollable top-end that causes the wrecks.
+        private const float PURSUIT_MAX_SPEED = 40.0f;
 
         // How far around the cruiser we look for other cops already in a fight.
         private const float ASSIST_SCAN_RADIUS = 90f;
@@ -657,12 +675,16 @@ namespace QualifiedImmunity
         // the ride, so a replacement can take over. (Cleanup() would end the whole ride.)
         private void ReleaseCurrentUnit()
         {
+            PersistUnitRoster();   // bank this unit's crew/ranks before the peds are let go
             if (_copBlip != null && _copBlip.Exists()) _copBlip.Delete();
             _copBlip = null;
-            if (_driver != null && _driver.Exists())
-            { RideAlongRegistry.FriendlyCops.Remove(_driver.Handle); CopNames.Forget(_driver.Handle); _driver.MarkAsNoLongerNeeded(); }
-            if (_partner != null && _partner.Exists())
-            { RideAlongRegistry.FriendlyCops.Remove(_partner.Handle); CopNames.Forget(_partner.Handle); _partner.MarkAsNoLongerNeeded(); }
+            // Handle-keyed bookkeeping is removed UNCONDITIONALLY (a despawned ped's
+            // stale registry entry would mark whatever ped recycles the handle as a
+            // friendly cop); the entity itself is only released if it still exists.
+            if (_driver != null)
+            { RideAlongRegistry.FriendlyCops.Remove(_driver.Handle); CopNames.Forget(_driver.Handle); if (_driver.Exists()) _driver.MarkAsNoLongerNeeded(); }
+            if (_partner != null)
+            { RideAlongRegistry.FriendlyCops.Remove(_partner.Handle); CopNames.Forget(_partner.Handle); if (_partner.Exists()) _partner.MarkAsNoLongerNeeded(); }
             ReleaseSquad();
             if (_copCar != null && _copCar.Exists())
             {
@@ -675,8 +697,12 @@ namespace QualifiedImmunity
         private void ReleaseSquad()
         {
             foreach (Ped sq in _squad)
-                if (sq != null && sq.Exists())
-                { RideAlongRegistry.FriendlyCops.Remove(sq.Handle); CopNames.Forget(sq.Handle); sq.MarkAsNoLongerNeeded(); }
+            {
+                if (sq == null) continue;
+                RideAlongRegistry.FriendlyCops.Remove(sq.Handle);   // unconditional: stale handles poison recycled peds
+                CopNames.Forget(sq.Handle);
+                if (sq.Exists()) sq.MarkAsNoLongerNeeded();
+            }
             _squad.Clear();
             _squadSeats.Clear();
         }
@@ -706,6 +732,8 @@ namespace QualifiedImmunity
             PedHash copModel = PedHash.Cop01SMY;
             _eliteUnit = 0;
             _crookedAgent = false;
+            _usesRoster = false;
+            UnitDef rosterDef = default(UnitDef);
             // Rarest first: an undercover sting ride (plainclothes officers in an
             // unmarked Police4 -- it has the hidden flashers). Replacements are
             // always regular units. Otherwise, small chance of a special unit.
@@ -728,6 +756,18 @@ namespace QualifiedImmunity
                 // guns and product to the gangs (see RideAlong.Crooked.cs).
                 _crookedAgent = _eliteUnit == 2 && _rng.Next(100) < 35;
             }
+            else
+            {
+                // A regular numbered patrol unit. Each draw is a DIFFERENT cruiser model
+                // (so the roof number/markings actually vary instead of always reading 32),
+                // and each model is a persistent unit with its own callsign + named crew.
+                rosterDef = PickRegularUnit();
+                _usesRoster = true;
+                _unitNumber = rosterDef.Number;
+                _unitHud = rosterDef.Hud;
+                carModel = rosterDef.Model;
+                copModel = rosterDef.Cop;
+            }
 
             // Spawn slightly in the air so the chassis doesn't clip into the road mesh
             Vector3 spawnPos = new Vector3(roadPos.X, roadPos.Y, roadPos.Z + 2.5f);
@@ -735,16 +775,18 @@ namespace QualifiedImmunity
             if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); Cleanup(); return; }
             Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _copCar);
             Function.Call(Hash.FREEZE_ENTITY_POSITION, _copCar, false); // ensure physics is active, not frozen
-            // Pin marked cruisers to livery 0 -- its roof decal reads 32, which is what
-            // the unit HUD shows, so the callsign matches the number painted on the roof.
-            if (_eliteUnit == 0 && !_undercover)
+            // Pin the Police3 cruiser to livery 0 -- its roof decal reads 32, the callsign
+            // UNIT 32 uses. Other roster models keep their own default markings/number.
+            if (carModel == VehicleHash.Police3)
                 Function.Call(Hash.SET_VEHICLE_LIVERY, _copCar, 0);
             if (_eliteUnit != 0) DeckOutVehicle(_copCar);
 
             _driver = _copCar.CreatePedOnSeat(VehicleSeat.Driver, new Model(copModel));
-            // Elite units always roll two-deep (the crooked agent works ALONE);
-            // regular cars ~50% chance of a partner.
-            bool hasPartner = !_crookedAgent && (_eliteUnit != 0 || _rng.Next(2) == 0);
+            // Elite units always roll two-deep (the crooked agent works ALONE). Regular
+            // roster units have a FIXED crew size per unit (so a given callsign is always
+            // a one- or two-officer car); other cases keep the old ~50% partner roll.
+            bool hasPartner = _usesRoster ? rosterDef.Partner
+                                          : (!_crookedAgent && (_eliteUnit != 0 || _rng.Next(2) == 0));
             if (hasPartner) _partner = _copCar.CreatePedOnSeat(VehicleSeat.Passenger, new Model(copModel));
 
             _playerSeat = hasPartner ? 2 : 0;                    // rear-right if partnered, else front passenger
@@ -819,21 +861,30 @@ namespace QualifiedImmunity
             if (Valid(_partner)) CopNames.Apply(_partner);
             foreach (Ped sq in _squad) { LockIntoCar(sq); CopNames.Apply(sq); }
 
+            // Regular numbered units pull a PERSISTENT crew: the same named officers (and
+            // the ranks they've earned over past rides with this unit) are restored onto
+            // the fresh peds, overriding the random Officer that CopNames.Apply just rolled.
+            // Officers killed last time were dropped from the roster, so a dead slot comes
+            // back as a fresh rookie -- "same officers unless they die and are replaced".
+            if (_usesRoster) RestoreUnitCrew();
+
             // Elite gear AFTER CopNames.Apply so the operator loadout/health wins
-            // over the rank-based one. Elite calls also roll elite STAFF: rank floored
-            // at Sergeant and re-titled to the unit -- no more NOOSE vans crewed by
-            // rookie "Officers".
+            // over the rank-based one. Elite calls also roll elite STAFF: started
+            // mid-ladder for command-grade stats and re-titled to the unit -- no more
+            // NOOSE vans crewed by rookie "Officers". The unit title is FIXED (it's a
+            // designation, not a rank), so it stays as they gain levels.
             if (_eliteUnit != 0)
             {
                 OutfitEliteUnit(_driver);
                 OutfitEliteUnit(_partner);
                 string eliteTitle = _eliteUnit == 1 ? "Operator" : "Agent";
-                CopNames.ForceEliteRank(_driver, eliteTitle);
-                CopNames.ForceEliteRank(_partner, eliteTitle);
+                string eliteShort = _eliteUnit == 1 ? "Op." : "Agt.";
+                CopNames.ForceEliteRank(_driver, eliteTitle, eliteShort);
+                CopNames.ForceEliteRank(_partner, eliteTitle, eliteShort);
                 foreach (Ped sq in _squad)
                 {
                     OutfitEliteUnit(sq);
-                    CopNames.ForceEliteRank(sq, eliteTitle);
+                    CopNames.ForceEliteRank(sq, eliteTitle, eliteShort);
                 }
             }
 
@@ -842,6 +893,7 @@ namespace QualifiedImmunity
             // re-issues this periodically -- _lastReissue starts at MinValue so the
             // first OnTick re-tasks the unit promptly.
             MakeRideAlongDriver(_driver);
+            MakeOfficerDownable(_driver);
             IssueEnRouteDrive(player, true);
 
             // Stabilize the partner: take them out of police AI too (else they fight to
@@ -853,6 +905,7 @@ namespace QualifiedImmunity
                 Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, _partner, true);
                 Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, _partner);
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
+                MakeOfficerDownable(_partner);
             }
             for (int i = 0; i < _squad.Count; i++)
             {
@@ -862,6 +915,7 @@ namespace QualifiedImmunity
                 Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, sq, true);
                 Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, sq);
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, sq, _copCar, _squadSeats[i]);
+                MakeOfficerDownable(sq);
             }
 
             // Suppress the player's wanted system for the duration of the ride -- set ONCE
@@ -1018,7 +1072,14 @@ namespace QualifiedImmunity
             if (!_announcedLoad)
             {
                 _announcedLoad = true;
-                Notify("~g~Qualified Immunity V8.0:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                // Clean slate: if a previous ride/session left the player's wanted system
+                // suppressed and the cops ignoring you (e.g. a reload that skipped cleanup),
+                // restore it now. OUTSIDE a ride-along you're meant to be normal fair game --
+                // hostile to the police and able to shoot (and be shot by) them. Done once,
+                // not per-frame (hammering SET_POLICE_IGNORE_PLAYER freezes cop AI -- see below).
+                Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, Game.Player, false);
+                Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
+                Notify("~g~Qualified Immunity V8.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1033,10 +1094,18 @@ namespace QualifiedImmunity
             Ped player = Game.Player.Character;
             if (player == null || !player.Exists() || player.IsDead) { Cleanup(); return; }
 
-            // Unit lost (wrecked cruiser, or all officers down) -> dispatch a replacement
-            // and keep the ride going, until the replacement budget runs out.
-            if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's wrecked."); return; }
+            // If the driver falls, the next living crew member (partner, then any
+            // squad operator) takes the wheel so the ride survives losing ONE officer.
             PromoteDriverIfNeeded();
+
+            // The whole unit is gone -> the ride is over, full stop. This wins over the
+            // replacement logic: when EVERY officer is dead there's no one to keep going
+            // with, so we end cleanly here (Cleanup also restores your normal wanted
+            // system, so you're back to being fair game for the police).
+            if (!AnyOfficerAlive()) { Notify("~r~Dispatch:~w~ Your entire unit is down. Ride-along over."); Cleanup(); return; }
+
+            // Cruiser wrecked but crew alive -> replacement (if the budget allows), else end.
+            if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's wrecked."); return; }
             if (!Valid(_driver)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Officers are down."); return; }
 
             // Someone shooting at OUR cruiser/officers on patrol -> engage them.
@@ -1092,6 +1161,7 @@ namespace QualifiedImmunity
                 Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, Game.Player);
             }
 
+            DownedOfficerTick();  // hold wounded officers in a savable downed state
             TourniquetTick(player);
             CrewMedicTick();      // officers patch up their own downed squadmates
             UnitProgressTick();   // XP for shooting/kills, level-ups
@@ -1344,7 +1414,11 @@ namespace QualifiedImmunity
                         else _driverOutSince = DateTime.MinValue;
                         // Patrol: re-kick the wander on a timer so it keeps driving (the task
                         // goes inert otherwise). 6s is long enough not to feel erratic.
-                        if (CarStalled() && (DateTime.Now - _lastWander).TotalSeconds > 6.0)
+                        // Only while the driver is actually behind the wheel -- handing a
+                        // vehicle task to a driver who's OUT (playing medic for a downed
+                        // squadmate) yanks him off the patient and back toward the car.
+                        if (Valid(_driver) && _driver.IsInVehicle(_copCar)
+                            && CarStalled() && (DateTime.Now - _lastWander).TotalSeconds > 6.0)
                         {
                             _lastWander = DateTime.Now;
                             Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, DRIVE_STYLE);
@@ -1680,19 +1754,33 @@ namespace QualifiedImmunity
         private void PromoteDriverIfNeeded()
         {
             if (Valid(_driver)) return;
-            if (Valid(_partner))
+
+            // Prefer the partner; otherwise the first living squad operator (elite vans).
+            // Whoever's left standing keeps the ride going -- it only ends once the WHOLE
+            // unit is down (see the AnyOfficerAlive check in OnTick).
+            bool fromPartner = Valid(_partner);
+            Ped successor = fromPartner ? _partner : null;
+            if (successor == null)
             {
-                _driver = _partner;
-                _partner = null;
-                MakeRideAlongDriver(_driver);
-                if (Valid(_copCar))
-                {
-                    // Unlock front right passenger door now that it's vacant
-                    Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 1, 1); // Front Right (Passenger) Unlocked
-                    // Re-point the exclusive-driver slot at the promoted officer so the
-                    // player still can't end up behind the wheel.
-                    Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, _driver, 0);
-                }
+                for (int i = 0; i < _squad.Count; i++)
+                    if (Valid(_squad[i])) { successor = _squad[i]; _squad.RemoveAt(i); _squadSeats.RemoveAt(i); break; }
+            }
+            if (successor == null) return;
+
+            if (fromPartner) _partner = null;
+            _driver = successor;
+            MakeRideAlongDriver(_driver);
+            MakeOfficerDownable(_driver);
+            if (Valid(_copCar))
+            {
+                // A squad member is in a back seat -> slide him over to the wheel. (The
+                // partner is already up front, so the original promotion never warped him.)
+                if (!fromPartner) Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
+                // Unlock front right passenger door now that it's vacant
+                Function.Call(Hash.SET_VEHICLE_INDIVIDUAL_DOORS_LOCKED, _copCar, 1, 1); // Front Right (Passenger) Unlocked
+                // Re-point the exclusive-driver slot at the promoted officer so the
+                // player still can't end up behind the wheel.
+                Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, _driver, 0);
             }
         }
 
@@ -1741,6 +1829,101 @@ namespace QualifiedImmunity
             // NOTE: deliberately NOT setting PreferNavmeshInChase -- on Enhanced it can
             // push the AI off the road grid (driving over sidewalks/terrain) instead of
             // following roads, which wrecks normal driving. Let it use the road network.
+        }
+
+        // A regular numbered patrol unit: a specific cruiser MODEL, its radio callsign,
+        // the cop ped model, and whether it's a two-officer car. Each entry is a distinct,
+        // persistent unit (see UnitRoster) -- using different models is what actually makes
+        // the roof number/markings vary between rides instead of every car reading "32".
+        private struct UnitDef
+        {
+            public VehicleHash Model; public int Number; public string Hud; public PedHash Cop; public bool Partner;
+            public UnitDef(VehicleHash m, int n, string hud, PedHash cop, bool partner)
+            { Model = m; Number = n; Hud = hud; Cop = cop; Partner = partner; }
+        }
+
+        // The patrol fleet. Police3 keeps callsign 32 (its pinned livery paints "32" on
+        // the roof, so that one matches exactly); the rest are distinct cruiser/SUV models
+        // so you get visibly different units. Crew size is FIXED per unit (some solo, some
+        // two-up) so a given callsign always has the same make-up.
+        private static readonly UnitDef[] RegularUnits =
+        {
+            new UnitDef(VehicleHash.Police3,    32, "UNIT 32",    PedHash.Cop01SMY,     true),
+            new UnitDef(VehicleHash.Police,     18, "UNIT 18",    PedHash.Cop01SMY,     true),
+            new UnitDef(VehicleHash.Police2,    24, "UNIT 24",    PedHash.Cop01SMY,     false),
+            new UnitDef(VehicleHash.Police5,    41, "UNIT 41",    PedHash.Cop01SMY,     true),
+            new UnitDef(VehicleHash.Sheriff,     6, "SHERIFF 6",  PedHash.Cop01SMY,     true),
+            new UnitDef(VehicleHash.Sheriff2,    9, "SHERIFF 9",  PedHash.Cop01SMY,     false),
+            new UnitDef(VehicleHash.Pranger,     3, "RANGER 3",   PedHash.Ranger01SMY,  false),
+            new UnitDef(VehicleHash.PoliceOld2, 51, "UNIT 51",    PedHash.Cop01SMY,     false),
+        };
+
+        // Draw a regular unit, avoiding an immediate repeat so you don't get the same
+        // cruiser (and crew) two calls running.
+        private UnitDef PickRegularUnit()
+        {
+            UnitDef def;
+            for (int tries = 0; tries < 8; tries++)
+            {
+                def = RegularUnits[_rng.Next(RegularUnits.Length)];
+                if (def.Number != _lastUnitNumber) { _lastUnitNumber = def.Number; return def; }
+            }
+            def = RegularUnits[_rng.Next(RegularUnits.Length)];
+            _lastUnitNumber = def.Number;
+            return def;
+        }
+
+        // Pull this unit's persistent crew (names + earned ranks) onto the freshly spawned
+        // peds, replacing the random Officer CopNames.Apply rolled. A slot whose officer
+        // was killed on a previous ride comes back as a brand-new rookie.
+        private void RestoreUnitCrew()
+        {
+            int size = 1 + (Valid(_partner) ? 1 : 0);
+            System.Collections.Generic.List<UnitRoster.OfficerRecord> crew =
+                UnitRoster.GetOrCreate(_unitNumber, size);
+            if (Valid(_driver) && crew.Count > 0) SeedOfficer(_driver, crew[0]);
+            if (Valid(_partner) && crew.Count > 1) SeedOfficer(_partner, crew[1]);
+        }
+
+        // Apply a stored identity (name + the rank their XP has earned) to a live officer.
+        private void SeedOfficer(Ped p, UnitRoster.OfficerRecord rec)
+        {
+            if (!Valid(p) || rec == null) return;
+            int rankIdx = Math.Min(CopNames.MaxRankLevel - 1, rec.Xp / XpPerLevel);
+            CopNames.Restore(p, rec.Name, rankIdx);
+            _xp[p.Handle] = rec.Xp;
+            _lvl[p.Handle] = rankIdx + 1;
+            ApplyRankTactics(p, rankIdx + 1);
+        }
+
+        // Save this unit's CURRENT crew back to the roster so their growth carries to the
+        // next ride. Only living officers persist; the dead are dropped (and refilled with
+        // rookies next time the unit is dispatched). Promotions mid-ride moved whoever was
+        // alive into the seats, so persisting by "who's in the car now" is correct.
+        private void PersistUnitRoster()
+        {
+            if (!_usesRoster) return;
+            var living = new System.Collections.Generic.List<UnitRoster.OfficerRecord>();
+            if (Valid(_driver)) living.Add(new UnitRoster.OfficerRecord(CopNames.NameOf(_driver), XpOf(_driver)));
+            if (Valid(_partner)) living.Add(new UnitRoster.OfficerRecord(CopNames.NameOf(_partner), XpOf(_partner)));
+            UnitRoster.SetMembers(_unitNumber, living);
+            _usesRoster = false;   // guard against a second persist (e.g. release-then-cleanup) wiping the crew
+        }
+
+        // Make a ride-along officer go DOWN (incapacitated, savable) instead of dying
+        // outright when shot up. THE fix for "I ran over to my wounded driver and he
+        // just died -- no tourniquet option": with DiesWhenInjured off, a fatal hit
+        // drops the officer into the bleeding-out injured state and KEEPS him there
+        // (alive, IS_PED_INJURED true) instead of killing him, so there's a real,
+        // lasting window to reach him and apply a tourniquet. Critical-hit instakills
+        // are off too, so a single rifle round can't skip the downed state. The
+        // bleed-out timer (DownedOfficerTick) is what finally kills him if nobody saves
+        // him in time. ResetProgression/spawn re-applies this each ride.
+        private void MakeOfficerDownable(Ped p)
+        {
+            if (!Valid(p)) return;
+            Function.Call(Hash.SET_PED_DIES_WHEN_INJURED, p, false);
+            Function.Call(Hash.SET_PED_SUFFERS_CRITICAL_HITS, p, false);
         }
 
         private void MakeRideAlongDriver(Ped p)
@@ -1817,7 +2000,25 @@ namespace QualifiedImmunity
         private void SetPursuitAggression(Ped p)
         {
             if (!Valid(p)) return;
-            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, Math.Max(0.8f, _driverAggressiveness));
+            // 0.7 (was 0.8): still well above the calm patrol value, so the chase AI
+            // happily runs reds and pushes through traffic -- but eased just enough
+            // that it stops barging off the road, cutting blind corners, and ramming
+            // street furniture. The speed CAP (ApplyPursuitDriveProfile) does the rest.
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, p, Math.Max(0.7f, _driverAggressiveness));
+        }
+
+        // Re-assert the full code-3 chase profile on the driver: the weave-traffic
+        // driving style, a sane top-speed CAP, and push-through-traffic aggression.
+        // Called wherever a chase task is (re)issued AND every pursuit tick, because
+        // TASK_VEHICLE_CHASE swaps its driving subtasks as it runs and drops these
+        // one-shot settings on the swap (which is why re-asserting only the style
+        // never fully cured the reckless pursuit driving).
+        private void ApplyPursuitDriveProfile(Ped p)
+        {
+            if (!Valid(p)) return;
+            Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, p, RIDE_DRIVE_STYLE);
+            Function.Call(Hash.SET_DRIVE_TASK_MAX_CRUISE_SPEED, p, PURSUIT_MAX_SPEED);
+            SetPursuitAggression(p);
         }
 
         // Put a unit back into calm, road-following PATROL driving after a pursuit/assist.
@@ -2013,6 +2214,8 @@ namespace QualifiedImmunity
 
         private void Cleanup()
         {
+            PersistUnitRoster();   // bank the unit's surviving crew/ranks before tearing down
+
             try
             {
                 if (Game.Player != null)
@@ -2023,8 +2226,23 @@ namespace QualifiedImmunity
             }
             catch { }
 
-            RideAlongRegistry.FriendlyCops.Clear();
-            foreach (Entity ent in _backupEntities) { if (ent != null && ent.Exists()) ent.MarkAsNoLongerNeeded(); }
+            // Remove only OUR handles -- the registry is shared with AmbientPolice's
+            // staged officers (re-registered only every ~350ms), so a wholesale Clear()
+            // hands the gang-cop AI a window to hijack a peaceful staged scene (the same
+            // hazard the SpawnUnit NOTE covers). Handles are removed unconditionally
+            // (not via Valid(), which is false for dead officers and would leak the
+            // handle into the registry to poison whatever ped the engine recycles it to).
+            if (_driver != null) RideAlongRegistry.FriendlyCops.Remove(_driver.Handle);
+            if (_partner != null) RideAlongRegistry.FriendlyCops.Remove(_partner.Handle);
+            if (_heliPilot != null) RideAlongRegistry.FriendlyCops.Remove(_heliPilot.Handle);
+            if (_heliGunner != null) RideAlongRegistry.FriendlyCops.Remove(_heliGunner.Handle);
+            foreach (Ped sq in _squad) if (sq != null) RideAlongRegistry.FriendlyCops.Remove(sq.Handle);
+            foreach (Entity ent in _backupEntities)
+            {
+                Ped bp = ent as Ped;
+                if (bp != null) RideAlongRegistry.FriendlyCops.Remove(bp.Handle);
+                if (ent != null && ent.Exists()) ent.MarkAsNoLongerNeeded();
+            }
             _backupEntities.Clear();
             _backupCount = 0;
             foreach (Ped s in _suspectPeds) { if (Valid(s)) s.MarkAsNoLongerNeeded(); }
@@ -2036,8 +2254,11 @@ namespace QualifiedImmunity
             StopNewsCam();
             if (_copBlip != null && _copBlip.Exists()) _copBlip.Delete();
             _copBlip = null;
-            if (Valid(_driver)) { CopNames.Forget(_driver.Handle); _driver.MarkAsNoLongerNeeded(); }
-            if (Valid(_partner)) { CopNames.Forget(_partner.Handle); _partner.MarkAsNoLongerNeeded(); }
+            // Not Valid() here: a DEAD officer must still be forgotten (or his name
+            // leaks from the pool) and released (or his corpse stays mission-pinned
+            // forever -- BodyRecovery re-pins and collects it once it's handed back).
+            if (_driver != null) { CopNames.Forget(_driver.Handle); if (_driver.Exists()) _driver.MarkAsNoLongerNeeded(); }
+            if (_partner != null) { CopNames.Forget(_partner.Handle); if (_partner.Exists()) _partner.MarkAsNoLongerNeeded(); }
             ReleaseSquad();
             ReleaseDealPeds();
             TrafficCalm.ReleaseAll();
@@ -2229,15 +2450,30 @@ namespace QualifiedImmunity
             // Dispatch phone is up -> it owns the D-pad (menu nav).
             if (_phoneOpen) return;
 
-            bool camOn = _newsCam != null;
-            if (Game.IsControlJustPressed(GTA.Control.PhoneLeft)) ToggleNewsChopperCamera();
-
-            if (camOn)
+            // OPEN only. While the feed is up, HeliFeedTick owns the D-pad (it runs in
+            // every phase) -- handling the same controls here too made each press fire
+            // TWICE in the same frame: Left opened the feed and HeliFeedTick closed it
+            // the same tick (one-frame flash), zoom stepped double, and the optics
+            // cycle skipped a mode.
+            if (_newsCam == null)
             {
-                if (Game.IsControlJustPressed(GTA.Control.PhoneUp)) HeliCamZoomStep(+1);
-                if (Game.IsControlJustPressed(GTA.Control.PhoneDown)) HeliCamZoomStep(-1);
-                if (Game.IsControlJustPressed(GTA.Control.PhoneRight)) HeliCamCycleOptics();
+                // The same physical press is the radio wheel in a vehicle -- eat it
+                // so patching into the feed doesn't also pop the radio HUD.
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)GTA.Control.VehicleRadioWheel, true);
+                if (DpadJustPressed(GTA.Control.PhoneLeft))
+                    ToggleNewsChopperCamera();
             }
+        }
+
+        // Raw D-pad read. In a vehicle the game DISABLES the cellphone inputs
+        // (the D-pad belongs to the radio wheel there), so the enabled-only
+        // Game.IsControlJustPressed never fired from the cruiser's seats -- the
+        // keyboard key worked and D-pad Left did nothing. The IS_DISABLED_*
+        // native reports the physical press whether or not the control is
+        // currently enabled.
+        private static bool DpadJustPressed(GTA.Control c)
+        {
+            return Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, (int)c);
         }
 
         // TEMP diagnostic: shows the cruiser's live state so we can see whether the
@@ -2293,6 +2529,10 @@ namespace QualifiedImmunity
         private class Cop
         {
             public int RankIdx; public string Name; public string Display;
+            // Elite units carry a FIXED designation ("Operator", "Agent") shown in
+            // place of the rank title -- it never changes as they level. Null for
+            // regular cops, whose Display title IS their current rank.
+            public string UnitTitle; public string UnitShort;
             public WeaponHash Primary; public WeaponHash Secondary;
         }
 
@@ -2341,10 +2581,11 @@ namespace QualifiedImmunity
 
         private struct RankDef
         {
-            public string Title; public int Health; public int Accuracy; public int ShootRate;
+            public string Title; public string Short; public int Accuracy; public int ShootRate;
+            public int Ability;   // SET_PED_COMBAT_ABILITY: 0 poor, 1 average, 2 professional ("ego")
             public WeaponHash[] Primaries;
-            public RankDef(string t, int h, int a, int s, WeaponHash[] w)
-            { Title = t; Health = h; Accuracy = a; ShootRate = s; Primaries = w; }
+            public RankDef(string t, string sh, int a, int s, int ab, WeaponHash[] w)
+            { Title = t; Short = sh; Accuracy = a; ShootRate = s; Ability = ab; Primaries = w; }
         }
 
         private static readonly WeaponHash[] Pistols =
@@ -2353,35 +2594,41 @@ namespace QualifiedImmunity
             WeaponHash.HeavyPistol, WeaponHash.VintagePistol, WeaponHash.Pistol50
         };
 
+        // Every officer's fixed health -- IDENTICAL at every rank. Promotions buy
+        // competence and firepower, NEVER survivability, so leveling up never raises
+        // HP (a deliberate design rule, not an oversight).
+        private const int BaseHealth = 200;
+
+        // The real police rank ladder, lowest to highest. LEVEL N maps straight to
+        // Ranks[N-1], so a fresh "Officer" at Level 1 climbs Corporal -> Sergeant ->
+        // ... and tops out at SHERIFF (Level 10). Each step sharpens accuracy, ego
+        // (combat ability), and ARMAMENTS (a heavier primary) -- but not health.
         private static readonly RankDef[] Ranks =
         {
-            new RankDef("Officer",    200, 45, 550,  new[] { WeaponHash.Pistol, WeaponHash.CombatPistol, WeaponHash.PumpShotgun }),
-            new RankDef("Corporal",   260, 55, 650,  new[] { WeaponHash.PumpShotgun, WeaponHash.SawnOffShotgun, WeaponHash.MicroSMG }),
-            new RankDef("Sergeant",   340, 66, 800,  new[] { WeaponHash.AssaultShotgun, WeaponHash.SMG, WeaponHash.CarbineRifle }),
-            new RankDef("Lieutenant", 440, 78, 950,  new[] { WeaponHash.CarbineRifle, WeaponHash.SpecialCarbine, WeaponHash.MarksmanRifle }),
-            new RankDef("Captain",    560, 90, 1000, new[] { WeaponHash.MarksmanRifleMk2, WeaponHash.HeavySniper, WeaponHash.CombatMG })
+            new RankDef("Officer",      "Ofc.",      40,  500, 0, new[] { WeaponHash.Pistol, WeaponHash.CombatPistol }),
+            new RankDef("Corporal",     "Cpl.",      48,  600, 0, new[] { WeaponHash.CombatPistol, WeaponHash.PumpShotgun }),
+            new RankDef("Sergeant",     "Sgt.",      56,  700, 1, new[] { WeaponHash.PumpShotgun, WeaponHash.MicroSMG }),
+            new RankDef("Lieutenant",   "Lt.",       64,  800, 1, new[] { WeaponHash.SMG, WeaponHash.CarbineRifle }),
+            new RankDef("Captain",      "Cpt.",      72,  850, 2, new[] { WeaponHash.CarbineRifle, WeaponHash.AssaultShotgun }),
+            new RankDef("Commander",    "Cmdr.",     80,  900, 2, new[] { WeaponHash.CarbineRifle, WeaponHash.SpecialCarbine }),
+            new RankDef("Major",        "Maj.",      86,  950, 2, new[] { WeaponHash.SpecialCarbine, WeaponHash.MarksmanRifle }),
+            new RankDef("Deputy Chief", "Dep.Chief", 92, 1000, 2, new[] { WeaponHash.CarbineRifleMk2, WeaponHash.MarksmanRifleMk2 }),
+            new RankDef("Undersheriff", "Undershrf", 96, 1000, 2, new[] { WeaponHash.SpecialCarbineMk2, WeaponHash.CombatMG }),
+            new RankDef("Sheriff",      "Sheriff",  100, 1000, 2, new[] { WeaponHash.CombatMGMk2, WeaponHash.CarbineRifleMk2 }),
         };
 
-        private static int RollRank()
-        {
-            int r = Rng.Next(100);
-            if (r < 50) return 0;
-            if (r < 75) return 1;
-            if (r < 90) return 2;
-            if (r < 98) return 3;
-            return 4;
-        }
+        public static int MaxRankLevel { get { return Ranks.Length; } }
 
+        // Everyone STARTS as a rookie Officer (rank 0 / Level 1) and earns the rest.
         private static Cop Ensure(Ped p)
         {
             Cop c;
             if (Assigned.TryGetValue(p.Handle, out c)) return c;
             string name = PickName();
-            int rank = RollRank();
-            RankDef rd = Ranks[rank];
+            RankDef rd = Ranks[0];
             c = new Cop
             {
-                RankIdx = rank,
+                RankIdx = 0,
                 Name = name,
                 Display = rd.Title + " " + name,
                 Primary = rd.Primaries[Rng.Next(rd.Primaries.Length)],
@@ -2414,15 +2661,24 @@ namespace QualifiedImmunity
 
         // Compact "Sgt. Tucker" form for the unit HUD. The full comedy name
         // ("Sergeant Sam \"Leadspitter\" Tucker") overflows the narrow HUD box
-        // and shoved the level text outside it.
-        private static readonly string[] ShortTitles = { "Ofc.", "Cpl.", "Sgt.", "Lt.", "Cpt." };
+        // and shoved the level text outside it. Elite units show their unit short
+        // ("Op.", "Agt."); everyone else shows their current rank's short title.
         public static string HudFor(Ped p)
         {
             if (p == null || !p.Exists()) return "Officer";
             Cop c = Ensure(p);
             int cut = c.Name.LastIndexOf(' ');
             string last = cut >= 0 ? c.Name.Substring(cut + 1) : c.Name;
-            return ShortTitles[c.RankIdx] + " " + last;
+            string sh = c.UnitShort ?? Ranks[c.RankIdx].Short;
+            return sh + " " + last;
+        }
+
+        // The officer's current rank/unit title alone (no name) -- for promotion lines.
+        public static string TitleOf(Ped p)
+        {
+            if (p == null || !p.Exists()) return "Officer";
+            Cop c = Ensure(p);
+            return c.UnitTitle ?? Ranks[c.RankIdx].Title;
         }
 
         public static void Apply(Ped p)
@@ -2431,14 +2687,77 @@ namespace QualifiedImmunity
             Cop c = Ensure(p);
             RankDef r = Ranks[c.RankIdx];
 
-            Function.Call(Hash.SET_ENTITY_MAX_HEALTH, p, r.Health);
-            Function.Call(Hash.SET_ENTITY_HEALTH, p, r.Health);
+            Function.Call(Hash.SET_ENTITY_MAX_HEALTH, p, BaseHealth);
+            Function.Call(Hash.SET_ENTITY_HEALTH, p, BaseHealth);
             Function.Call(Hash.SET_PED_ACCURACY, p, r.Accuracy);
             Function.Call(Hash.SET_PED_SHOOT_RATE, p, r.ShootRate);
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, p, r.Ability);
 
             Function.Call(Hash.GIVE_WEAPON_TO_PED, p, unchecked((int)(uint)c.Secondary), 250, false, false);
             Function.Call(Hash.GIVE_WEAPON_TO_PED, p, unchecked((int)(uint)c.Primary), 350, false, true);
             Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, 54, true);  // AlwaysEquipBestWeapon
+        }
+
+        // Restore a PERSISTED identity onto a fresh ped: a specific name plus the rank
+        // their past service has earned. Overrides whatever Ensure/Apply rolled, then
+        // pushes that rank's stats/gear/title onto the ped (no HP gain -- same rule as a
+        // promotion). Used by the persistent unit roster.
+        public static void Restore(Ped p, string name, int rankIdx)
+        {
+            if (p == null || !p.Exists()) return;
+            if (rankIdx < 0) rankIdx = 0;
+            if (rankIdx > Ranks.Length - 1) rankIdx = Ranks.Length - 1;
+            RankDef rd = Ranks[rankIdx];
+            Cop c = new Cop
+            {
+                RankIdx = rankIdx,
+                Name = name,
+                Display = rd.Title + " " + name,
+                Primary = rd.Primaries[Rng.Next(rd.Primaries.Length)],
+                Secondary = Pistols[Rng.Next(Pistols.Length)]
+            };
+            Assigned[p.Handle] = c;
+            UsedNames.Add(name);
+            Apply(p);
+        }
+
+        // The officer's stored name (no title), for banking back to the roster.
+        public static string NameOf(Ped p)
+        {
+            if (p == null || !p.Exists()) return "Officer";
+            return Ensure(p).Name;
+        }
+
+        // A fresh, unique "First \"Nick\" Last" for a brand-new rookie record.
+        public static string NewName() { return PickName(); }
+
+        // Promote an officer to a new rank (rankIdx == level - 1). Updates the shown
+        // title (for regular cops) and the things a promotion actually buys: accuracy,
+        // ego (combat ability), and ARMAMENTS (a fresh, heavier primary they switch to).
+        // It NEVER touches health/armour -- rank is competence and firepower, not HP.
+        // Returns true only when the visible TITLE changed (so elite units, whose
+        // designation is fixed, report a plain "level up" instead of a "promotion").
+        public static bool PromoteTo(Ped p, int rankIdx)
+        {
+            if (p == null || !p.Exists()) return false;
+            Cop c = Ensure(p);
+            if (rankIdx < 0) rankIdx = 0;
+            if (rankIdx > Ranks.Length - 1) rankIdx = Ranks.Length - 1;
+            if (rankIdx <= c.RankIdx) return false;     // never demote / re-apply
+            c.RankIdx = rankIdx;
+            RankDef r = Ranks[rankIdx];
+
+            bool titleChanged = false;
+            if (c.UnitTitle == null) { c.Display = r.Title + " " + c.Name; titleChanged = true; }
+
+            Function.Call(Hash.SET_PED_ACCURACY, p, r.Accuracy);
+            Function.Call(Hash.SET_PED_SHOOT_RATE, p, r.ShootRate);
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, p, r.Ability);
+            // Armament upgrade: issue the rank's better primary and make them wield it.
+            c.Primary = r.Primaries[Rng.Next(r.Primaries.Length)];
+            Function.Call(Hash.GIVE_WEAPON_TO_PED, p, unchecked((int)(uint)c.Primary), 350, false, true);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, p, 54, true);  // AlwaysEquipBestWeapon
+            return titleChanged;
         }
 
         public static void Forget(int handle)
@@ -2447,28 +2766,76 @@ namespace QualifiedImmunity
             if (Assigned.TryGetValue(handle, out c)) { Assigned.Remove(handle); UsedNames.Remove(c.Name); }
         }
 
-        // Elite calls roll elite STAFF: floor the rank at Sergeant (heavy primaries,
-        // command-grade stats come with it) and re-title the crew to match the unit,
-        // so a NOOSE van is crewed by Operators, not rookie "Officers".
-        public static void ForceEliteRank(Ped p, string title)
+        // Elite calls roll elite STAFF: started mid-ladder (heavy primaries +
+        // command-grade stats) and given a FIXED unit designation (Operator / Agent)
+        // that's shown instead of a rank and never changes as they earn levels.
+        public static void ForceEliteRank(Ped p, string title, string shortTitle)
         {
             if (p == null || !p.Exists()) return;
             Cop c = Ensure(p);
-            if (c.RankIdx < 2)
-            {
-                c.RankIdx = 2 + Rng.Next(3);    // Sergeant / Lieutenant / Captain tier
-                RankDef rd = Ranks[c.RankIdx];
-                c.Primary = rd.Primaries[Rng.Next(rd.Primaries.Length)];
-            }
+            if (c.RankIdx < 4) c.RankIdx = 4 + Rng.Next(2);   // Captain / Commander tier
+            RankDef rd = Ranks[c.RankIdx];
+            c.Primary = rd.Primaries[Rng.Next(rd.Primaries.Length)];
+            c.UnitTitle = title; c.UnitShort = shortTitle;
             c.Display = title + " " + c.Name;
+            Function.Call(Hash.SET_PED_ACCURACY, p, rd.Accuracy);
+            Function.Call(Hash.SET_PED_SHOOT_RATE, p, rd.ShootRate);
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, p, rd.Ability);
+        }
+    }
+
+    // Session-persistent crews for the numbered patrol units. A unit's officers (and the
+    // ranks they earn riding with you) survive across rides, so calling "UNIT 32" again
+    // brings back the same names -- until one dies, whose slot returns as a fresh rookie.
+    internal static class UnitRoster
+    {
+        // One officer's standing record: a fixed identity (name) plus the XP banked over
+        // past rides, which is what determines their current rank when re-spawned.
+        internal class OfficerRecord
+        {
+            public string Name; public int Xp;
+            public OfficerRecord(string name, int xp) { Name = name; Xp = xp; }
         }
 
-        // The rolled rank's baseline accuracy -- the XP system stacks its level
-        // bonus on top of this without ever changing the rank itself.
-        public static int BaseAccuracy(Ped p)
+        // Unit callsign number -> its standing crew (driver first, then partner).
+        private static readonly System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<OfficerRecord>> Crews =
+            new System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<OfficerRecord>>();
+
+        // This unit's crew, topped up to `size` with fresh rookie Officers (XP 0) -- so a
+        // slot emptied by a death last ride comes back as a new recruit.
+        public static System.Collections.Generic.List<OfficerRecord> GetOrCreate(int unitNumber, int size)
         {
-            if (p == null || !p.Exists()) return 50;
-            return Ranks[Ensure(p).RankIdx].Accuracy;
+            System.Collections.Generic.List<OfficerRecord> crew;
+            if (!Crews.TryGetValue(unitNumber, out crew))
+            { crew = new System.Collections.Generic.List<OfficerRecord>(); Crews[unitNumber] = crew; }
+            while (crew.Count < size) crew.Add(new OfficerRecord(NewUniqueName(), 0));
+            return crew;
+        }
+
+        // Replace a unit's standing crew with its current survivors (dead officers dropped).
+        public static void SetMembers(int unitNumber, System.Collections.Generic.List<OfficerRecord> members)
+        {
+            Crews[unitNumber] = members ?? new System.Collections.Generic.List<OfficerRecord>();
+        }
+
+        // A name not already parked in any unit's standing crew. (CopNames.NewName already
+        // avoids names on live peds; this also avoids names held by other rosters between rides.)
+        private static string NewUniqueName()
+        {
+            for (int i = 0; i < 24; i++)
+            {
+                string n = CopNames.NewName();
+                if (!NameInUse(n)) return n;
+            }
+            return CopNames.NewName();
+        }
+
+        private static bool NameInUse(string name)
+        {
+            foreach (var kv in Crews)
+                foreach (OfficerRecord m in kv.Value)
+                    if (m.Name == name) return true;
+            return false;
         }
     }
 

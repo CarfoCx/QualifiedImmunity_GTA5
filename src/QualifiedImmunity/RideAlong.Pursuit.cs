@@ -71,8 +71,7 @@ namespace QualifiedImmunity
             _copCar.IsSirenActive = true;
             Function.Call(Hash.TASK_VEHICLE_CHASE, _driver, _suspect);
             Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, _driver, _idealFollowDistance);
-            Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE); // avoid traffic while chasing
-            SetPursuitAggression(_driver);   // run lights / push traffic, not patrol manners
+            ApplyPursuitDriveProfile(_driver);   // weave traffic + speed cap + run-lights aggression
             if (Valid(_partner)) DriveBy(_partner, _suspect);
 
             _engaged = false;
@@ -163,10 +162,10 @@ namespace QualifiedImmunity
             // manners off driver aggressiveness, so the calm patrol value (0.3)
             // had the cruiser politely obeying traffic laws mid-chase.
             if (!_engaged && Valid(_driver) && Valid(_copCar) && _driver.IsInVehicle(_copCar))
-            {
-                Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE);
-                SetPursuitAggression(_driver);
-            }
+                ApplyPursuitDriveProfile(_driver);
+
+            // Never leave the partner behind on a moving chase (see KeepChaseCrewAboard).
+            if (!_engaged) KeepChaseCrewAboard();
 
             // Keep the chase locked onto a LIVE suspect. If the designated suspect dies but
             // others are still running (multi-suspect / gang pursuits), re-point at one that's
@@ -217,7 +216,17 @@ namespace QualifiedImmunity
             if (_engaged)
             {
                 Ped aliveSusp = AliveSuspect();
-                if (aliveSusp != null && aliveSusp.IsInVehicle())
+                // Resume the chase ONLY for a real getaway: a freshly jacked vehicle,
+                // or his own car genuinely rolling again. Engage() usually fires while
+                // the suspect is still SITTING in his parked car (the bail-out takes a
+                // beat), and the old any-vehicle check flipped straight back to pursuit
+                // on the very next tick -- the officers ping-ponged out/in of the
+                // cruiser looking glitched, and every re-issued task restarted the
+                // combat challenge bark mid-word, over and over.
+                Vehicle ride = (aliveSusp != null && aliveSusp.IsInVehicle()) ? aliveSusp.CurrentVehicle : null;
+                bool newRide = Valid(ride) && ride != _suspectCar && ride != _suspectCar2;
+                bool ownCarRolling = Valid(ride) && !newRide && ride.IsDriveable && ride.Speed > 3f;
+                if (aliveSusp != null && (newRide || ownCarRolling))
                 {
                     _engaged = false;
                     _suspectCar = aliveSusp.CurrentVehicle;
@@ -240,10 +249,23 @@ namespace QualifiedImmunity
                     if (Valid(_partner)) MakeRideAlongDriver(_partner);
 
                     // Release the combat KEEP_TASK lock first, or they reject the re-board.
-                    if (Valid(_driver)) Function.Call(Hash.SET_PED_KEEP_TASK, _driver, false);
-                    if (Valid(_partner)) Function.Call(Hash.SET_PED_KEEP_TASK, _partner, false);
+                    // Releasing the lock does NOT stop the combat task already running --
+                    // and while it runs, TASK_ENTER_VEHICLE is rejected and the officer
+                    // just stands at the scene (same pitfall ReboardCop documents).
+                    if (Valid(_driver)) { Function.Call(Hash.SET_PED_KEEP_TASK, _driver, false); Function.Call(Hash.CLEAR_PED_TASKS, _driver); }
+                    if (Valid(_partner)) { Function.Call(Hash.SET_PED_KEEP_TASK, _partner, false); Function.Call(Hash.CLEAR_PED_TASKS, _partner); }
                     if (Valid(_driver)) Function.Call(Hash.TASK_ENTER_VEHICLE, _driver, _copCar, -1, -1, 2.0f, 1, 0);
                     if (Valid(_partner)) Function.Call(Hash.TASK_ENTER_VEHICLE, _partner, _copCar, -1, -1, 2.0f, 1, 0);
+
+                    // Fresh-pursuit grace. Without these resets the engage check
+                    // re-tripped on the very next tick: _suspectStoppedSince still held
+                    // a timestamp from the standing fight (so the just-jacked car read
+                    // as "parked for 1.5s") and the >6s-old pursuit clock satisfied
+                    // chasedLongEnough -- the officers bailed right back out while
+                    // "RESUME PURSUIT" was still on screen.
+                    _suspectStoppedSince = DateTime.MinValue;
+                    _lastPursuitStart = DateTime.Now;
+                    _lastCarMoving = DateTime.Now;   // let the re-board finish before the stall re-kick
                     return;
                 }
             }
@@ -288,14 +310,16 @@ namespace QualifiedImmunity
                     {
                         Function.Call(Hash.TASK_VEHICLE_CHASE, _driver, _suspect);
                         Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, _driver, _idealFollowDistance);
-                        Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE);
+                        ApplyPursuitDriveProfile(_driver);
                     }
-                    else if (Valid(_driver))
+                    else if (Valid(_driver) && !IsEnteringCruiser(_driver))
                     {
+                        // Same walk-in guard as ReboardCop: re-issuing the enter task
+                        // over an in-progress entry restarts the animation every 2.5s.
                         Function.Call(Hash.TASK_ENTER_VEHICLE, _driver, _copCar, -1, -1, 2.0f, 1, 0);
                     }
                     if (Valid(_partner) && _partner.IsInVehicle(_copCar)) DriveBy(_partner, _suspect);
-                    else if (Valid(_partner) && !_partner.IsInVehicle(_copCar)) Function.Call(Hash.TASK_ENTER_VEHICLE, _partner, _copCar, -1, -1, 2.0f, 1, 0);
+                    else if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && !IsEnteringCruiser(_partner)) Function.Call(Hash.TASK_ENTER_VEHICLE, _partner, _copCar, -1, -1, 2.0f, 1, 0);
                 }
             }
         }
@@ -319,7 +343,9 @@ namespace QualifiedImmunity
             foreach (Ped s in _suspectPeds)
             {
                 if (!Valid(s)) continue;
-                bool carjack = _rng.Next(100) < 40;
+                // Only armed crews try to fight their way into a getaway car --
+                // an "innocent" suspect carjacking a bystander undercuts the bit.
+                bool carjack = !_suspectsInnocent && _rng.Next(100) < 40;
                 Vehicle targetVehicle = null;
                 if (carjack)
                 {
@@ -396,7 +422,7 @@ namespace QualifiedImmunity
                     {
                         Function.Call(Hash.TASK_VEHICLE_CHASE, _driver, _suspect);
                         Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, _driver, _idealFollowDistance);
-                        Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, _driver, RIDE_DRIVE_STYLE);
+                        ApplyPursuitDriveProfile(_driver);
                     }
                 }
                 return;
@@ -491,6 +517,44 @@ namespace QualifiedImmunity
             return false;
         }
 
+        // Never strand the partner on a rolling chase. THE bug behind "the driver
+        // took off without the other officer, so the rest of my ride was solo":
+        // when a chase resumes, the driver floors it the instant HE'S seated, but a
+        // partner still on foot can never run down a moving cruiser -- so he's left
+        // at the scene for good (he stays a valid, alive, available ped; nothing ever
+        // goes back for him). Recover him every tick while we're chasing:
+        //   - cruiser stopped/crawling -> re-issue a walk-in board (proper animation),
+        //   - cruiser actually rolling -> warp him into his seat. The whole chase
+        //     happens off-screen from the player (who's riding in the cruiser), so the
+        //     warp is invisible -- far better than permanently losing the partner.
+        // Skipped while he's mid-combat (don't yank him out of a firefight) or already
+        // walking to the door (re-issuing restarts the animation).
+        private void KeepChaseCrewAboard()
+        {
+            if (!Valid(_copCar) || !Valid(_partner)) return;
+            if (_partner.IsInVehicle(_copCar) || _partner.IsInjured) return;
+            if (IsEnteringCruiser(_partner)) return;
+            if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0)) return;
+
+            bool rolling = Valid(_driver) && _driver.IsInVehicle(_copCar) && _copCar.Speed > 5.0f;
+            if (rolling)
+            {
+                // Can't catch a moving car on foot -> seat him directly (off-screen).
+                MakeRideAlongDriver(_partner);
+                Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
+                if (Valid(_suspect)) DriveBy(_partner, _suspect);
+            }
+            else
+            {
+                // Car is stopped/crawling -> let him walk back in for the animation.
+                Function.Call(Hash.SET_PED_AS_COP, _partner, false);
+                Function.Call(Hash.SET_PED_KEEP_TASK, _partner, false);
+                Function.Call(Hash.CLEAR_PED_TASKS, _partner);
+                Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, _partner, CA_CanUseVehicles, true);
+                Function.Call(Hash.TASK_ENTER_VEHICLE, _partner, _copCar, -1, 0, 2.0f, 1, 0);
+            }
+        }
+
         private void DriveBy(Ped shooter, Ped target)
         {
             if (!Valid(shooter) || !Valid(target)) return;
@@ -518,11 +582,12 @@ namespace QualifiedImmunity
             _suspectPeds.Clear();
             _suspectCar = World.CreateVehicle(new Model(VehicleHash.Buccaneer),
                 new Vector3(scene.X + 2.5f, scene.Y + 2.5f, scene.Z + 0.5f));
-            if (_suspectCar != null)
-            {
-                Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _suspectCar);
-                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _suspectCar, true, true);
-            }
+            // No getaway car -> no sting. The Pursuit phase treats a missing
+            // _suspectCar as "pursuit resolved", so triggering the bust without one
+            // would end it the same frame it started. Fall back to a normal patrol.
+            if (_suspectCar == null) return false;
+            Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _suspectCar);
+            Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _suspectCar, true, true);
             for (int i = 0; i < 3; i++)
             {
                 Model m = new Model(i == 0 ? PedHash.Dealer01SMY : PedHash.StrPunk01GMY);
