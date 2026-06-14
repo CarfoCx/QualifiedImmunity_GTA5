@@ -1070,8 +1070,13 @@ namespace QualifiedImmunity
                 // don't empty in a demolition derby because of shots a block away.
                 bool threatOnTopOfThem = drv.Position.DistanceTo(shootingCop.Position) < 12f;
 
+                // Calmer reactions across the board: unless the muzzle flash is right on
+                // top of them, drivers stay cautious (slow/pull over and wait it out)
+                // rather than stampeding. Even point-blank, the floor-it rammer (was 8%)
+                // and the bail-and-run (was 30%) are now rare -- the realistic majority
+                // just pulls to the curb and keeps their head down.
                 int roll = _rng.Next(100);
-                if (threatOnTopOfThem && roll < 8 && _panicRammer == null)
+                if (threatOnTopOfThem && roll < 3 && _panicRammer == null)
                 {
                     // THE PANIC FLOORER: mashes the gas at... someone. 50/50 the cop
                     // (instant chaos -- the assault detectors take it from there) or
@@ -1090,7 +1095,7 @@ namespace QualifiedImmunity
                     _panicRamUntil = DateTime.Now.AddSeconds(8.0);
                     GTA.UI.Notification.PostTicker("~y~A panicking driver just FLOORED it...", false);
                 }
-                else if (threatOnTopOfThem && roll < 38)
+                else if (threatOnTopOfThem && roll < 13)
                 {
                     // Bail out and run, screaming.
                     Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, drv, false);

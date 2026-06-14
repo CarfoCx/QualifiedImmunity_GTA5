@@ -312,6 +312,14 @@ namespace QualifiedImmunity
         {
             DespawnPursuitProps();
 
+            // Keep the cruiser STILL while the crew walks back in. The walk-in stalled
+            // (and then "teleported") mainly because the seated driver let the car idle
+            // forward / roll, so the boarding officer was forever chasing a moving door.
+            // Brake-holding it gives every officer a stationary target, so the natural
+            // entry animation reliably finishes and the warp fallback below never has to.
+            if (Valid(_driver) && _driver.IsInVehicle(_copCar) && !AllCrewAboard())
+                Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 1, 2000); // brake & hold
+
             // Re-board the OFFICERS once on entry, then refresh only every ~9s -- long
             // enough that a re-issue doesn't interrupt an in-progress walk-in animation.
             bool refresh = SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 9.0;
@@ -325,22 +333,29 @@ namespace QualifiedImmunity
                     Notify("~b~Dispatch:~w~ Hop back in for another run - or walk away to call it.");
             }
 
-            // Fallback: warp a genuinely stuck officer back in so the unit is never stranded.
-            // Give the animated walk-in real time first (a cop can be several meters away
-            // after a foot chase). With the door unlocked + police-AI off, the walk-in
-            // normally finishes well before this, so the warp only fires if they're truly
-            // stuck -- you see the animation, not an instant teleport. (Never warp an
-            // officer who's still mid-combat, and never one whose walk-in task is live:
-            // warping over an in-progress entry IS the teleport the player keeps seeing.)
-            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 16
+            // If a walk-in DIED (task dropped, ped standing around) before they reached
+            // the door, re-issue it so they finish on foot -- a fresh ReboardCop, NOT a
+            // warp. ReboardCop self-guards against interrupting a live entry, so this only
+            // restarts an entry that actually stalled. This is what keeps the natural
+            // animation going instead of giving up and porting them into the seat.
+            ReissueStalledBoard(_driver, -1);
+            ReissueStalledBoard(_partner, 0);
+
+            // True last-resort anti-softlock ONLY. The car is held still above and the
+            // walk-in is re-kicked the moment it stalls, so a parked-car boarding finishes
+            // in a few seconds and this never fires in normal play -- it exists purely so a
+            // genuinely un-pathable officer (door fouled against a wall, etc.) can't hang
+            // the ride forever. Pushed way out (was 16/18/20s) so you always see the walk-in,
+            // never a teleport. Never warp a ped mid-combat or with a live entry task.
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar) && SecondsInPhase > 45
                 && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _driver, 0)
                 && !IsEnteringCruiser(_driver))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _driver, _copCar, -1);
-            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 18
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar) && SecondsInPhase > 47
                 && !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, _partner, 0)
                 && !IsEnteringCruiser(_partner))
                 Function.Call(Hash.SET_PED_INTO_VEHICLE, _partner, _copCar, 0);
-            if (SecondsInPhase > 20) WarpStuckSquad();
+            if (SecondsInPhase > 50) WarpStuckSquad();
 
             // YOU decide: get back in on your own to keep going, or leave and it ends. Never forced.
             if (!player.IsInVehicle(_copCar))
@@ -359,8 +374,8 @@ namespace QualifiedImmunity
                 // let me back in" after I walked over to see what was happening). The ride
                 // only ends if you genuinely leave the scene (wander well clear of the car)
                 // or after a long grace with you nowhere near it.
-                if (gap < 7f)
-                    ShowHelp("Press ~INPUT_ENTER~ to get back in and continue the ride-along.");
+                if (gap < 8f)
+                    TryPlayerReboard(player);   // actively walk/seat them into THEIR seat on enter
                 else if (SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 9.0)
                     Notify("~b~Dispatch:~w~ Your unit's holding for you - walk back and get in (" + SeatName(_playerSeat) + ").");
 
@@ -382,6 +397,29 @@ namespace QualifiedImmunity
                 Notify("~g~Back on patrol.");
                 ResumePatrol();
             }
+        }
+
+        // Every officer (driver + partner + any elite squad) is back in the cruiser.
+        private bool AllCrewAboard()
+        {
+            if (Valid(_driver) && !_driver.IsInVehicle(_copCar)) return false;
+            if (Valid(_partner) && !_partner.IsInVehicle(_copCar)) return false;
+            return SquadAboard();
+        }
+
+        // Natural-entry watchdog: if an officer's walk-in task has DIED (not aboard, not
+        // mid-combat, no live entry task) re-issue it on a short throttle so they finish
+        // walking in -- instead of the old behavior of just teleporting them into the seat.
+        // ReboardCop self-guards against interrupting a live entry, and the throttle keeps
+        // a freshly-issued task from being torn up before the engine registers it.
+        private void ReissueStalledBoard(Ped c, int seat)
+        {
+            if (!Valid(c) || c.IsInVehicle(_copCar)) return;
+            if (IsEnteringCruiser(c)) return;                                  // walk-in is live -> leave it
+            if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, c, 0)) return;      // still fighting -> don't pull him
+            if ((DateTime.Now - _lastBoardKick).TotalSeconds < 2.0) return;    // let the last kick register
+            _lastBoardKick = DateTime.Now;
+            ReboardCop(c, seat);
         }
 
         private void ReboardCop(Ped c, int seat)
@@ -413,6 +451,37 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, true); // don't bail out to react
             // flag 1 = walk to the door and play the proper entry animation (not a warp).
             Function.Call(Hash.TASK_ENTER_VEHICLE, c, _copCar, 20000, seat, 2.0f, 1, 0);
+        }
+
+        // Walk the PLAYER back into THEIR seat when they're near the cruiser and press
+        // enter. THE fix for "it told me I could get back in but it wouldn't let me": the
+        // bare help prompt relied on the game's native enter, which on a fully-crewed
+        // police car sends the player at the nearest door -- usually the AI driver's,
+        // whose seat is pinned -- so they shove at an occupied seat forever and never
+        // reach their own open one. Targeting _playerSeat explicitly (with a warp
+        // fallback if the door's fouled) makes re-boarding actually work.
+        private void TryPlayerReboard(Ped player)
+        {
+            if (player.IsInVehicle(_copCar)) { _playerReboardAt = DateTime.MinValue; return; }
+            if (!Valid(_copCar) || _copCar.Position.DistanceTo(player.Position) > 8f)
+            { _playerReboardAt = DateTime.MinValue; return; }
+
+            ShowHelp("Press ~INPUT_ENTER~ to get back in and continue the ride-along.");
+            if (_playerReboardAt == DateTime.MinValue
+                && (Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)GTA.Control.Enter)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)GTA.Control.Context)))
+            {
+                _playerReboardAt = DateTime.Now;
+                Function.Call(Hash.TASK_ENTER_VEHICLE, player, _copCar, 10000, _playerSeat, 2.0f, 1, 0);
+            }
+            // Walk-in blocked (door fouled, no path) -> just seat them so the ride can
+            // never get stuck unable to re-board.
+            if (_playerReboardAt != DateTime.MinValue
+                && (DateTime.Now - _playerReboardAt).TotalSeconds > 4.0)
+            {
+                Function.Call(Hash.SET_PED_INTO_VEHICLE, player, _copCar, _playerSeat);
+                _playerReboardAt = DateTime.MinValue;
+            }
         }
 
         // True while a scripted enter-vehicle task is live on the ped (walking to the

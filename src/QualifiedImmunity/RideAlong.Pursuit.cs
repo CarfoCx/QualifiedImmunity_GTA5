@@ -88,6 +88,7 @@ namespace QualifiedImmunity
             _lastCarMoving = DateTime.Now;    // give the fresh chase task time to spool up
             _escapeTimerStarted = DateTime.MinValue; // reset escape timer
             _suspectStoppedSince = DateTime.MinValue; // reset the "car has stopped" tracker
+            _suspectRollingSince = DateTime.MinValue; // reset the "car is rolling again" tracker
             _lastPursuitStart = DateTime.Now; // track UI timer
 
             CopBark(_driver, "GENERIC_WAR_CRY"); // a single voiced bark, no extra ticker line
@@ -145,14 +146,16 @@ namespace QualifiedImmunity
 
         private void PursuitTick()
         {
-            // While the on-foot firefight is live, keep surrounding traffic from
-            // stampeding -- distant drivers stop and wait it out (TrafficCalm);
-            // only cars right next to the muzzle flash get to panic for real.
-            if (_engaged)
-            {
-                Ped fightCenter = AliveSuspect();
-                if (fightCenter != null) TrafficCalm.Sweep(fightCenter.Position);
-            }
+            // Keep surrounding traffic from stampeding. Real drivers yield to a siren
+            // and keep their heads down at the sound of gunfire -- they don't all floor
+            // it in a demolition derby. So during BOTH the rolling chase (sirens) and the
+            // on-foot firefight (gunfire) we sweep the area and have uninvolved drivers
+            // cautiously slow/pull over and wait it out. Centered on the on-foot fight
+            // while engaged, otherwise on the cruiser as the pursuit rolls through traffic.
+            // (TrafficCalm skips the suspects, cops, and anyone point-blank to the action.)
+            Ped fightCenter = _engaged ? AliveSuspect() : null;
+            if (fightCenter != null) TrafficCalm.Sweep(fightCenter.Position);
+            else if (!_engaged && Valid(_copCar)) TrafficCalm.Sweep(_copCar.Position);
 
             // TASK_VEHICLE_CHASE swaps driving subtasks as it runs (pursue/ram/block),
             // and a one-shot SET_DRIVE_TASK_DRIVING_STYLE gets dropped on the swap --
@@ -225,9 +228,27 @@ namespace QualifiedImmunity
                 // combat challenge bark mid-word, over and over.
                 Vehicle ride = (aliveSusp != null && aliveSusp.IsInVehicle()) ? aliveSusp.CurrentVehicle : null;
                 bool newRide = Valid(ride) && ride != _suspectCar && ride != _suspectCar2;
-                bool ownCarRolling = Valid(ride) && !newRide && ride.IsDriveable && ride.Speed > 3f;
+
+                // Only treat the suspect's OWN car as "getting away" once it's genuinely
+                // rolling and STAYS rolling for a beat -- not on a single twitchy speed
+                // reading. While the officers are out shooting a suspect still sitting in
+                // his driveable car, the car creeps from impacts/throttle taps and the old
+                // instantaneous ">3 m/s" test flipped straight back to pursuit; they
+                // re-boarded, the car stopped, they re-engaged, and so on -- the officers
+                // ping-ponged in and out of the cruiser "instead of continuing the pursuit".
+                // Require ~6 m/s sustained for 1.2s (mirrors the suspectParked gate).
+                bool ownCarMoving = Valid(ride) && !newRide && ride.IsDriveable && ride.Speed > 6f;
+                if (ownCarMoving)
+                {
+                    if (_suspectRollingSince == DateTime.MinValue) _suspectRollingSince = DateTime.Now;
+                }
+                else _suspectRollingSince = DateTime.MinValue;
+                bool ownCarRolling = _suspectRollingSince != DateTime.MinValue
+                                     && (DateTime.Now - _suspectRollingSince).TotalSeconds > 1.2;
+
                 if (aliveSusp != null && (newRide || ownCarRolling))
                 {
+                    _suspectRollingSince = DateTime.MinValue;
                     _engaged = false;
                     _suspectCar = aliveSusp.CurrentVehicle;
                     _suspect = aliveSusp;

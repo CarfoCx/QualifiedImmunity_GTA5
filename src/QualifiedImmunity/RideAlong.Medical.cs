@@ -219,6 +219,10 @@ namespace QualifiedImmunity
             yield return _driver;
             yield return _partner;
             foreach (Ped sq in _squad) yield return sq;
+            // Fallen officers whose slot was overwritten (a promoted-over dead driver):
+            // they're all dead, so the live-unit ticks (XP, medic, AnyOfficerAlive) skip
+            // them on their Valid/IsDead guards, but the HUD still draws their K.I.A. row.
+            foreach (Ped f in _fallen) yield return f;
         }
 
         private int SeatOf(Ped c)

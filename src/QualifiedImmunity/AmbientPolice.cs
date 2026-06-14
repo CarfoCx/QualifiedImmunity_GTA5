@@ -13,6 +13,11 @@ namespace QualifiedImmunity
     //   - Resist      : suspect resists, gets tazed (ragdoll) and cuffed.
     //   - Gunfight    : armed suspect(s) trade fire with the officers.
     //   - Gang        : a heavily-armed crew that can overpower the responders.
+    //   - Pursuit     : a suspect car flees; cruisers chase (sirens) then box it in and
+    //                   either cuff the driver or shoot it out when it stops.
+    //   - DrugBust    : officers raid a small dealer crew at a stash car -- surrender or shootout.
+    //   - SwatRaid    : a NOOSE van of armoured operators breaches a dug-in, rifle-armed crew.
+    //   - FootChase   : an armed suspect bails on foot; officers pursue into a running gun battle.
     // Dangerous scenes call for backup (extra units drive in). Dead bodies are left for
     // the BodyRecovery script to collect. C# 5-compatible; API names verified vs SHVDNE.
     public class AmbientPolice : Script
@@ -30,7 +35,7 @@ namespace QualifiedImmunity
         private readonly DateTime _scriptStart = DateTime.Now; // when this script loaded
         private int _eventsSpawned;                            // first couple scenes are forced calm
 
-        private enum EType { TrafficStop, Arrest, Resist, Gunfight, Gang }
+        private enum EType { TrafficStop, Arrest, Resist, Gunfight, Gang, Pursuit, DrugBust, SwatRaid, FootChase }
 
         private class Ev
         {
@@ -38,6 +43,7 @@ namespace QualifiedImmunity
             public int Stage;
             public DateTime Since = DateTime.Now;   // time the current stage began
             public DateTime Start = DateTime.Now;   // time the whole event began
+            public DateTime LastRefresh = DateTime.Now; // last time tasks were re-issued (chase/combat)
             public Vehicle CopCar;
             public Vehicle SuspectCar;
             public readonly List<Ped> Cops = new List<Ped>();
@@ -170,6 +176,18 @@ namespace QualifiedImmunity
                 case EType.Gang:
                     BuildFight(ev, spot, heading, 2, 4);
                     break;
+                case EType.Pursuit:
+                    BuildPursuit(ev, spot, heading);
+                    break;
+                case EType.DrugBust:
+                    BuildDrugBust(ev, spot, heading);
+                    break;
+                case EType.SwatRaid:
+                    BuildSwatRaid(ev, spot, heading);
+                    break;
+                case EType.FootChase:
+                    BuildFootChase(ev, spot, heading);
+                    break;
             }
 
             if (CountAlive(ev.Cops) == 0) { Release(ev); return; }  // spawn failed -> bail
@@ -185,16 +203,19 @@ namespace QualifiedImmunity
             if (_eventsSpawned < 2)
                 return _rng.Next(2) == 0 ? EType.TrafficStop : EType.Arrest;
 
-            // Heavily weighted toward routine, calm stops/arrests. The active scenes a player
-            // reads as "cops chasing/fighting an NPC" (resist, gunfight, gang) are now a small
-            // minority so they stay rare and special -- toned WAY down per feedback that the
-            // ambient cops were pursuing NPCs too often. Still well above vanilla (which stages
-            // none of this on its own).
+            // Still weighted toward routine, calm stops/arrests -- those remain the MAJORITY
+            // (62%) so the world doesn't constantly erupt. The spectacular scenes (pursuit,
+            // drug bust, SWAT raid, foot-chase shootout, gunfight, gang) share the remaining
+            // ~38% so they stay special highlights you stumble onto, not the norm.
             int r = _rng.Next(100);
-            if (r < 48) return EType.TrafficStop; // 48%
-            if (r < 78) return EType.Arrest;      // 30%
-            if (r < 90) return EType.Resist;      // 12%
-            if (r < 97) return EType.Gunfight;    //  7%
+            if (r < 38) return EType.TrafficStop; // 38%  \
+            if (r < 62) return EType.Arrest;      // 24%   } 62% calm
+            if (r < 70) return EType.Resist;      //  8%   (taze-and-cuff)
+            if (r < 78) return EType.Pursuit;     //  8%   car chase
+            if (r < 84) return EType.DrugBust;    //  6%   raid on a dealer crew
+            if (r < 89) return EType.Gunfight;    //  5%
+            if (r < 93) return EType.FootChase;   //  4%   bail-out foot pursuit
+            if (r < 97) return EType.SwatRaid;    //  4%   NOOSE breach
             return EType.Gang;                     //  3%
         }
 
@@ -277,7 +298,16 @@ namespace QualifiedImmunity
             foreach (Ped c in ev.Cops) if (Valid(c)) RideAlongRegistry.FriendlyCops.Add(c.Handle);
             foreach (Entity b in ev.Backup) { Ped bp = b as Ped; if (Valid(bp)) RideAlongRegistry.FriendlyCops.Add(bp.Handle); }
 
-            if (ev.Where.DistanceTo(player.Position) > DespawnDist) return false;
+            // Despawn off a sensible anchor. Stationary scenes use their fixed origin;
+            // moving scenes (a car/foot chase) track the live suspect, so following the
+            // action doesn't tear it down and a chase that roams far still gets released.
+            Vector3 anchor = ev.Where;
+            if (ev.Type == EType.Pursuit || ev.Type == EType.FootChase)
+            {
+                Ped runner = First(ev.Suspects);
+                if (Valid(runner)) anchor = runner.Position;
+            }
+            if (anchor.DistanceTo(player.Position) > DespawnDist) return false;
             double age = (DateTime.Now - ev.Start).TotalSeconds;
 
             switch (ev.Type)
@@ -287,6 +317,10 @@ namespace QualifiedImmunity
                 case EType.Resist:      return UpdateStop(ev, age, true, true);
                 case EType.Gunfight:
                 case EType.Gang:        return UpdateFight(ev, player, age);
+                case EType.SwatRaid:    return UpdateFight(ev, player, age); // a breach is just a heavy fight
+                case EType.Pursuit:     return UpdatePursuit(ev, player, age);
+                case EType.DrugBust:    return UpdateDrugBust(ev, player, age);
+                case EType.FootChase:   return UpdateFootChase(ev, player, age);
             }
             return false;
         }
@@ -432,6 +466,313 @@ namespace QualifiedImmunity
         }
 
         // -------------------------------------------------------------------
+        // Vehicle pursuit: a suspect car flees, cruiser(s) chase with sirens, then box
+        // it in. Resolves to a cuffing (unarmed runner) or a shootout (armed driver).
+        // -------------------------------------------------------------------
+        private void BuildPursuit(Ev ev, Vector3 spot, float heading)
+        {
+            Vector3 fwd = HeadingToVector(heading);
+
+            ev.SuspectCar = SpawnVehicle(VehiclePool(), spot, heading);
+            ev.CopCar = SpawnVehicle(VehicleHash.Police3, spot - fwd * 13f, heading);
+            if (ev.CopCar != null) ev.CopCar.IsSirenActive = true;
+
+            // ~45% of fleeing drivers are unarmed panickers; the rest are armed and the
+            // stop ends in gunfire once they're cornered.
+            int threat = _rng.Next(100) < 45 ? 0 : 2;
+            Ped driver = ev.SuspectCar != null
+                ? SpawnSuspect(ev.SuspectCar, VehicleSeat.Driver, Vector3.Zero, threat) : null;
+            if (driver != null) ev.Suspects.Add(driver);
+
+            Ped d = ev.CopCar != null ? SpawnCop(ev.CopCar, VehicleSeat.Driver, Vector3.Zero) : null;
+            Ped p = ev.CopCar != null ? SpawnCop(ev.CopCar, VehicleSeat.Passenger, Vector3.Zero) : null;
+            if (Valid(d)) { GiveCopWeapon(d, false); ev.Cops.Add(d); }   // GiveCopWeapon enables CanLeaveVehicle
+            if (Valid(p)) { GiveCopWeapon(p, false); ev.Cops.Add(p); }
+
+            // Suspect floors it; the cruiser gives chase.
+            if (Valid(driver) && Valid(ev.SuspectCar))
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, driver, ev.SuspectCar, 32.0f, 786603);
+            StartChase(ev);
+        }
+
+        // Re-issue the chase task to whichever officer is driving the cruiser. TASK_VEHICLE_CHASE
+        // drops its driving subtasks over time, so this is refreshed periodically.
+        private void StartChase(Ev ev)
+        {
+            Ped susp = First(ev.Suspects);
+            if (!Valid(susp) || ev.CopCar == null || !ev.CopCar.Exists()) return;
+            Ped copDriver = ev.CopCar.Driver;
+            if (!Valid(copDriver)) return;
+            Function.Call(Hash.TASK_VEHICLE_CHASE, copDriver, susp);
+            Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, copDriver, 12.0f);
+        }
+
+        private bool UpdatePursuit(Ev ev, Ped player, double age)
+        {
+            int copsAlive = CountAlive(ev.Cops) + CountAliveEntities(ev.Backup);
+            Ped driver = First(ev.Suspects);
+            if (copsAlive == 0) return age > 4;
+            if (!Valid(driver))
+            {
+                if (ev.Stage < 8) { ev.Stage = 8; ev.Since = DateTime.Now; }
+                return (DateTime.Now - ev.Since).TotalSeconds < 6;
+            }
+
+            switch (ev.Stage)
+            {
+                case 0: // chasing
+                    if ((DateTime.Now - ev.LastRefresh).TotalSeconds > 4.0) { StartChase(ev); ev.LastRefresh = DateTime.Now; }
+                    bool stopped = !Valid(ev.SuspectCar)
+                        || !Function.Call<bool>(Hash.IS_PED_IN_VEHICLE, driver, ev.SuspectCar, false)
+                        || ev.SuspectCar.Speed < 2.5f;
+                    if (stopped) { if ((DateTime.Now - ev.Since).TotalSeconds > 2.0) { ev.Stage = 1; ev.Since = DateTime.Now; } }
+                    else ev.Since = DateTime.Now;  // keep resetting the "has stopped" timer while it's rolling
+                    break;
+
+                case 1: // cornered -> resolve
+                    Ped lead = First(ev.Cops);
+                    if (SuspectArmed(driver))
+                    {
+                        CopLine(lead, "Suspect's armed -- take cover!");
+                        if (!ev.BackupCalled) { ev.BackupCalled = true; CallBackup(ev, 1); }
+                        EnsureFighting(ev);
+                        ev.Stage = 2; ev.Since = DateTime.Now; ev.LastRefresh = DateTime.Now;
+                    }
+                    else
+                    {
+                        // Get BOTH out of their cars first -- a seated ped can't put hands up,
+                        // and TASK_ARREST_PED on someone still in a seat is unreliable.
+                        if (Valid(ev.SuspectCar)
+                            && Function.Call<bool>(Hash.IS_PED_IN_VEHICLE, driver, ev.SuspectCar, false))
+                            Function.Call(Hash.TASK_LEAVE_VEHICLE, driver, ev.SuspectCar, 0);
+                        if (Valid(lead)) Function.Call(Hash.TASK_LEAVE_VEHICLE, lead, ev.CopCar, 0);
+                        CopLine(lead, "Out of the car -- hands up!");
+                        ev.Stage = 3; ev.Since = DateTime.Now;
+                    }
+                    break;
+
+                case 2: // shootout
+                    if (CountAlive(ev.Suspects) == 0) { ev.Stage = 8; ev.Since = DateTime.Now; break; }
+                    if ((DateTime.Now - ev.LastRefresh).TotalSeconds > 3.0) { EnsureFighting(ev); ev.LastRefresh = DateTime.Now; }
+                    break;
+
+                case 3: // runner is out of the car by now -> hands up, then cuff
+                    if ((DateTime.Now - ev.Since).TotalSeconds > 2.5)
+                    {
+                        Ped cop = First(ev.Cops);
+                        Function.Call(Hash.TASK_HANDS_UP, driver, 8000, cop, -1, false);
+                        if (Valid(cop)) Function.Call(Hash.TASK_ARREST_PED, cop, driver);
+                        ev.Stage = 4; ev.Since = DateTime.Now;
+                    }
+                    break;
+
+                case 4: if ((DateTime.Now - ev.Since).TotalSeconds > 9) return false; break;
+                case 8: return (DateTime.Now - ev.Since).TotalSeconds < 8;  // settle after a kill
+            }
+            return age < 150;
+        }
+
+        // -------------------------------------------------------------------
+        // Drug bust: officers raid a small dealer crew working out of a stash car. They
+        // move up; the crew either surrenders (cuffed) or opens fire (shootout + backup).
+        // -------------------------------------------------------------------
+        private void BuildDrugBust(Ev ev, Vector3 spot, float heading)
+        {
+            Vector3 fwd = HeadingToVector(heading);
+            bool armed = _rng.Next(100) < 55;  // a little over half go loud
+
+            ev.SuspectCar = SpawnVehicle(VehiclePool(), spot + RightOf(heading) * 3f, heading + 90f);
+
+            int dealers = 2 + _rng.Next(2);  // 2-3
+            for (int i = 0; i < dealers; i++)
+            {
+                Vector3 p = spot + RightOf(heading) * ((i - 1) * 1.4f);
+                Ped s = SpawnSuspect(null, VehicleSeat.None, p, armed ? 2 : 0);
+                if (s != null) ev.Suspects.Add(s);
+            }
+
+            ev.CopCar = SpawnVehicle(VehicleHash.Police3, spot - fwd * 14f, heading);
+            if (ev.CopCar != null) ev.CopCar.IsSirenActive = true;
+            Ped d = ev.CopCar != null ? SpawnCop(ev.CopCar, VehicleSeat.Driver, Vector3.Zero) : null;
+            Ped p2 = ev.CopCar != null ? SpawnCop(ev.CopCar, VehicleSeat.Passenger, Vector3.Zero) : null;
+            if (Valid(d)) { GiveCopWeapon(d, false); ev.Cops.Add(d); }
+            if (Valid(p2)) { GiveCopWeapon(p2, false); ev.Cops.Add(p2); }
+
+            // Officers move up on the crew. TASK_GO_TO_ENTITY pulls them out of the
+            // cruiser on its own -- issuing TASK_LEAVE_VEHICLE first would just get
+            // overridden by this in the same frame (see BuildStop for the same pattern).
+            Ped target = First(ev.Suspects);
+            foreach (Ped c in ev.Cops)
+            {
+                if (!Valid(c)) continue;
+                if (Valid(target)) Function.Call(Hash.TASK_GO_TO_ENTITY, c, target, -1, 3.0f, 2.0f, 1073741824.0f, 0);
+            }
+        }
+
+        private bool UpdateDrugBust(Ev ev, Ped player, double age)
+        {
+            int copsAlive = CountAlive(ev.Cops) + CountAliveEntities(ev.Backup);
+            int suspAlive = CountAlive(ev.Suspects);
+            if (copsAlive == 0 || suspAlive == 0)
+            {
+                if (ev.Stage < 8) { ev.Stage = 8; ev.Since = DateTime.Now; }
+                return (DateTime.Now - ev.Since).TotalSeconds < 8;
+            }
+
+            Ped cop = First(ev.Cops);
+            Ped lead = First(ev.Suspects);
+
+            switch (ev.Stage)
+            {
+                case 0: // moving in
+                    float gap = Valid(cop) && Valid(lead) ? cop.Position.DistanceTo(lead.Position) : 99f;
+                    if (gap < 8f || age > 14)
+                    {
+                        if (SuspectArmed(lead))
+                        {
+                            CopLine(cop, "Police! Drop the weapon!");
+                            ev.BackupCalled = true; CallBackup(ev, 2);
+                            EnsureFighting(ev);
+                            ev.Stage = 2; ev.Since = DateTime.Now; ev.LastRefresh = DateTime.Now;
+                        }
+                        else
+                        {
+                            CopLine(cop, "LSPD! On the ground, now!");
+                            foreach (Ped s in ev.Suspects)
+                                if (Valid(s)) Function.Call(Hash.TASK_HANDS_UP, s, 15000, cop, -1, false);
+                            ev.Stage = 1; ev.Since = DateTime.Now;
+                        }
+                    }
+                    break;
+
+                case 1: // surrender -> cuff the lead dealer
+                    if ((DateTime.Now - ev.Since).TotalSeconds > 2.0)
+                    {
+                        if (Valid(cop) && Valid(lead)) Function.Call(Hash.TASK_ARREST_PED, cop, lead);
+                        ev.Stage = 5; ev.Since = DateTime.Now;
+                    }
+                    break;
+
+                case 2: // shootout
+                    if ((DateTime.Now - ev.LastRefresh).TotalSeconds > 3.0) { EnsureFighting(ev); ev.LastRefresh = DateTime.Now; }
+                    break;
+
+                case 5: if ((DateTime.Now - ev.Since).TotalSeconds > 10) return false; break;
+            }
+            return age < 150;
+        }
+
+        // -------------------------------------------------------------------
+        // SWAT raid: a NOOSE van of armoured operators breaches a dug-in, rifle-armed crew.
+        // Heavier than a gunfight; uses the shared UpdateFight loop once it's underway.
+        // -------------------------------------------------------------------
+        private void BuildSwatRaid(Ev ev, Vector3 spot, float heading)
+        {
+            Vector3 fwd = HeadingToVector(heading);
+
+            int crew = 3 + _rng.Next(2);  // 3-4 heavily-armed targets
+            for (int i = 0; i < crew; i++)
+            {
+                Vector3 p = spot + fwd * 5f + RightOf(heading) * ((i - crew / 2) * 1.6f);
+                Ped s = SpawnSuspect(null, VehicleSeat.None, p, 3);
+                if (s != null) ev.Suspects.Add(s);
+            }
+
+            ev.CopCar = SpawnVehicle(VehicleHash.Riot, spot - fwd * 12f, heading);
+            if (ev.CopCar != null) ev.CopCar.IsSirenActive = true;
+            VehicleSeat[] seats = { VehicleSeat.Driver, VehicleSeat.Passenger, VehicleSeat.LeftRear, VehicleSeat.RightRear };
+            for (int i = 0; i < 4; i++)
+            {
+                Ped sw = ev.CopCar != null
+                    ? SpawnSwat(ev.CopCar, seats[i], Vector3.Zero)
+                    : SpawnSwat(null, VehicleSeat.None, spot - fwd * (5f + i));
+                if (Valid(sw)) ev.Cops.Add(sw);
+            }
+            EnsureFighting(ev);
+        }
+
+        // -------------------------------------------------------------------
+        // Foot chase: an armed suspect bails on foot, officers pursue, then it turns into
+        // a running gun battle as the suspect spins around and opens fire.
+        // -------------------------------------------------------------------
+        private void BuildFootChase(Ev ev, Vector3 spot, float heading)
+        {
+            Vector3 fwd = HeadingToVector(heading);
+
+            ev.CopCar = SpawnVehicle(VehicleHash.Police3, spot - fwd * 8f, heading);
+            if (ev.CopCar != null) ev.CopCar.IsSirenActive = true;
+
+            Ped susp = SpawnSuspect(null, VehicleSeat.None, spot + fwd * 6f, 2);
+            if (susp != null) ev.Suspects.Add(susp);
+
+            int copCount = 1 + _rng.Next(2);  // 1-2 officers on foot
+            VehicleSeat[] seats = { VehicleSeat.Driver, VehicleSeat.Passenger };
+            for (int i = 0; i < copCount; i++)
+            {
+                Ped c = ev.CopCar != null ? SpawnCop(ev.CopCar, seats[i], Vector3.Zero) : null;
+                if (!Valid(c)) continue;
+                GiveCopWeapon(c, false);
+                ev.Cops.Add(c);
+                if (Valid(ev.CopCar)) Function.Call(Hash.TASK_LEAVE_VEHICLE, c, ev.CopCar, 0);
+            }
+
+            Ped chaser = First(ev.Cops);
+            if (Valid(susp) && Valid(chaser))
+                Function.Call(Hash.TASK_SMART_FLEE_PED, susp, chaser, 200.0f, -1, false, false);
+        }
+
+        private bool UpdateFootChase(Ev ev, Ped player, double age)
+        {
+            int copsAlive = CountAlive(ev.Cops) + CountAliveEntities(ev.Backup);
+            int suspAlive = CountAlive(ev.Suspects);
+            if (copsAlive == 0 || suspAlive == 0)
+            {
+                if (ev.Stage < 8) { ev.Stage = 8; ev.Since = DateTime.Now; }
+                return (DateTime.Now - ev.Since).TotalSeconds < 8;
+            }
+
+            Ped susp = First(ev.Suspects);
+
+            switch (ev.Stage)
+            {
+                case 0: // foot pursuit
+                    if ((DateTime.Now - ev.LastRefresh).TotalSeconds > 2.0)
+                    {
+                        foreach (Ped c in ev.Cops)
+                            if (Valid(c) && Valid(susp))
+                                Function.Call(Hash.TASK_GO_TO_ENTITY, c, susp, -1, 2.0f, 4.0f, 1073741824.0f, 0);
+                        ev.LastRefresh = DateTime.Now;
+                    }
+                    // After a short run, or once a cop closes in, the suspect turns and fights.
+                    if (age > 6 || NearestGap(ev.Cops, susp) < 12f)
+                    {
+                        CopLine(First(ev.Cops), "He's turning -- gun!");
+                        if (!ev.BackupCalled) { ev.BackupCalled = true; CallBackup(ev, 1); }
+                        EnsureFighting(ev);
+                        ev.Stage = 2; ev.Since = DateTime.Now; ev.LastRefresh = DateTime.Now;
+                    }
+                    break;
+
+                case 2: // shootout
+                    if ((DateTime.Now - ev.LastRefresh).TotalSeconds > 3.0) { EnsureFighting(ev); ev.LastRefresh = DateTime.Now; }
+                    break;
+            }
+            return age < 120;
+        }
+
+        private static float NearestGap(List<Ped> cops, Ped from)
+        {
+            if (!Valid(from)) return 999f;
+            Ped n = NearestAlive(cops, from.Position, null);
+            return Valid(n) ? n.Position.DistanceTo(from.Position) : 999f;
+        }
+
+        private static bool SuspectArmed(Ped p)
+        {
+            return Valid(p) && Function.Call<bool>(Hash.IS_PED_ARMED, p, 7);
+        }
+
+        // -------------------------------------------------------------------
         // Spawning primitives
         // -------------------------------------------------------------------
         private Ped SpawnCop(Vehicle car, VehicleSeat seat, Vector3 footPos)
@@ -467,6 +808,35 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_COMBAT_RANGE, c, 1);              // medium range
             Function.Call(Hash.SET_PED_COMBAT_ABILITY, c, 2);           // professional
             if (heavy) { Function.Call(Hash.SET_PED_ARMOUR, c, 50); Function.Call(Hash.SET_PED_ACCURACY, c, 65); }
+        }
+
+        // A NOOSE operator: armoured, carbine, professional combat AI. Mirrors the SWAT
+        // setup the ride-along escalation uses so a raid feels like the same outfit.
+        private Ped SpawnSwat(Vehicle car, VehicleSeat seat, Vector3 footPos)
+        {
+            Ped c = car != null ? car.CreatePedOnSeat(seat, new Model(PedHash.Swat01SMY))
+                                : World.CreatePed(new Model(PedHash.Swat01SMY), footPos);
+            if (c == null || !c.Exists()) return null;
+            Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, c, true, true);
+            Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, c, _copGroup);
+            Function.Call(Hash.SET_PED_AS_COP, c, false);
+            Function.Call(Hash.SET_PED_ARMOUR, c, 100);
+            Function.Call(Hash.SET_ENTITY_MAX_HEALTH, c, 300);
+            Function.Call(Hash.SET_ENTITY_HEALTH, c, 300);
+            WeaponHash wh = _rng.Next(2) == 0 ? WeaponHash.CarbineRifle : WeaponHash.SpecialCarbine;
+            Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)wh), 300, false, true);
+            Function.Call(Hash.GIVE_WEAPON_TO_PED, c, unchecked((int)(uint)WeaponHash.Pistol), 200, false, false);
+            Function.Call(Hash.SET_PED_ACCURACY, c, 72);
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, c, 2);          // professional
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 5, true);  // always fight
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 46, true); // fight even unarmed
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 0, true);  // use cover
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 3, true);  // leave vehicle to fight
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, 42, true); // flank
+            Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, c, 2);          // advance
+            Function.Call(Hash.SET_PED_COMBAT_RANGE, c, 1);            // medium
+            RideAlongRegistry.FriendlyCops.Add(c.Handle);
+            return c;
         }
 
         // threat: 0 unarmed civ, 2 armed, 3 heavily-armed gang.

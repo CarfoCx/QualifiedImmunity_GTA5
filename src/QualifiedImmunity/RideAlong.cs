@@ -99,6 +99,12 @@ namespace QualifiedImmunity
             new System.Collections.Generic.List<Ped>();
         private readonly System.Collections.Generic.List<int> _squadSeats =
             new System.Collections.Generic.List<int>();
+        // Officers who fell whose roster slot would otherwise be overwritten (the dead
+        // driver, once a squadmate is promoted into the wheel). Kept so their K.I.A.
+        // flatline stays on the HUD until the patrol ends, instead of the corpse simply
+        // vanishing from the unit panel the moment someone takes over driving.
+        private readonly System.Collections.Generic.List<Ped> _fallen =
+            new System.Collections.Generic.List<Ped>();
         // Crooked-FIB ride variant: a lone agent who doesn't chase criminals --
         // he SUPPLIES them, running gun/product "errands" to gang buyers.
         private bool _crookedAgent;
@@ -120,6 +126,7 @@ namespace QualifiedImmunity
         private DateTime _lastBackup = DateTime.MinValue;
         private DateTime _lastReissue = DateTime.MinValue;
         private DateTime _lastReboardPrompt = DateTime.MinValue;
+        private DateTime _lastBoardKick = DateTime.MinValue;   // throttle re-kicking a stalled walk-in (natural entry watchdog)
         private double _ridePursuitDelay = 15.0;   // randomized 10-40s before each pursuit
         private double _radioDelay = 13.0;         // randomized gap between radio lines
         private bool _enableTourniquet = true;
@@ -171,6 +178,7 @@ namespace QualifiedImmunity
         private DateTime _pitSince = DateTime.MinValue;
         private DateTime _lastPit = DateTime.MinValue;
         private DateTime _suspectStoppedSince = DateTime.MinValue; // when the fleeing car actually stopped
+        private DateTime _suspectRollingSince = DateTime.MinValue; // when a parked/engaged suspect car started genuinely rolling again
         private DateTime _lastCollateral = DateTime.MinValue;
         private DateTime _lastProgress = DateTime.MinValue;   // en-route stuck/fail detection
         private float _lastEnRouteDist = float.MaxValue;       // track closing distance, not just speed
@@ -182,6 +190,7 @@ namespace QualifiedImmunity
         private int _reseatCount;                              // diagnostic: how many times we've force-reseated the driver
         private bool _boardTaskIssued;                         // walk-in task issued once per boarding
         private DateTime _boardTaskAt = DateTime.MinValue;     // when the walk-in was issued (for fallback)
+        private DateTime _playerReboardAt = DateTime.MinValue; // when the player's mid-ride walk-in was issued (for fallback)
         private DateTime _lastWander = DateTime.MinValue;      // throttle re-issuing the patrol wander
         private DateTime _lastCarMoving = DateTime.MinValue;   // last time the cruiser was actually moving
         private bool _pullingOver;                             // close to the player -> curb pull-over issued
@@ -343,8 +352,12 @@ namespace QualifiedImmunity
         // plow into the first corner/parked car/fence -- the "cops crash constantly
         // with lights and sirens on" complaint. Capping the chase keeps them fast
         // enough to stay on the suspect's bumper through traffic without the
-        // uncontrollable top-end that causes the wrecks.
-        private const float PURSUIT_MAX_SPEED = 40.0f;
+        // uncontrollable top-end that causes the wrecks. Eased 40 -> 35 (~78 mph):
+        // at 40 the cruiser still carried too much speed into corners/intersections
+        // and plowed parked cars and street furniture ("cops crash constantly").
+        // The suspect's wander rarely sustains its 50 m/s cap in city traffic, so
+        // 35 still runs them down through turns while braking corners cleanly.
+        private const float PURSUIT_MAX_SPEED = 35.0f;
 
         // How far around the cruiser we look for other cops already in a fight.
         private const float ASSIST_SCAN_RADIUS = 90f;
@@ -686,6 +699,7 @@ namespace QualifiedImmunity
             if (_partner != null)
             { RideAlongRegistry.FriendlyCops.Remove(_partner.Handle); CopNames.Forget(_partner.Handle); if (_partner.Exists()) _partner.MarkAsNoLongerNeeded(); }
             ReleaseSquad();
+            ReleaseFallen();
             if (_copCar != null && _copCar.Exists())
             {
                 Function.Call(Hash.SET_VEHICLE_EXCLUSIVE_DRIVER, _copCar, 0, 0); // release the seat claim
@@ -705,6 +719,21 @@ namespace QualifiedImmunity
             }
             _squad.Clear();
             _squadSeats.Clear();
+        }
+
+        // Hand back the fallen corpses we were holding for the K.I.A. HUD. Mirrors
+        // ReleaseSquad: unconditional registry/name cleanup (a leaked handle poisons a
+        // recycled ped), then release the body so BodyRecovery can collect it.
+        private void ReleaseFallen()
+        {
+            foreach (Ped f in _fallen)
+            {
+                if (f == null) continue;
+                RideAlongRegistry.FriendlyCops.Remove(f.Handle);
+                CopNames.Forget(f.Handle);
+                if (f.Exists()) f.MarkAsNoLongerNeeded();
+            }
+            _fallen.Clear();
         }
 
         // Spawn a ride-along unit OUT OF SIGHT at a distance and send it en route to the
@@ -775,10 +804,12 @@ namespace QualifiedImmunity
             if (_copCar == null) { Notify("~r~Dispatch:~w~ No units available - try near a road."); Cleanup(); return; }
             Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, _copCar);
             Function.Call(Hash.FREEZE_ENTITY_POSITION, _copCar, false); // ensure physics is active, not frozen
-            // Pin the Police3 cruiser to livery 0 -- its roof decal reads 32, the callsign
-            // UNIT 32 uses. Other roster models keep their own default markings/number.
-            if (carModel == VehicleHash.Police3)
-                Function.Call(Hash.SET_VEHICLE_LIVERY, _copCar, 0);
+            // Lock every roster cruiser to its assigned livery so the painted roof number
+            // is STABLE ride-to-ride and matches the HUD callsign (the engine otherwise
+            // randomizes police liveries, so the roof and HUD disagreed). Number/Hud in
+            // the roster table are set to the number that livery paints.
+            if (_usesRoster && rosterDef.Livery >= 0)
+                Function.Call(Hash.SET_VEHICLE_LIVERY, _copCar, rosterDef.Livery);
             if (_eliteUnit != 0) DeckOutVehicle(_copCar);
 
             _driver = _copCar.CreatePedOnSeat(VehicleSeat.Driver, new Model(copModel));
@@ -948,6 +979,7 @@ namespace QualifiedImmunity
             _driverOutSince = DateTime.MinValue;
             _reseatCount = 0;
             _boardTaskIssued = false;
+            _playerReboardAt = DateTime.MinValue;
             _lastEnRouteDist = float.MaxValue;
             _lastCarMoving = DateTime.Now;
             _pullingOver = false;
@@ -1079,7 +1111,7 @@ namespace QualifiedImmunity
                 // not per-frame (hammering SET_POLICE_IGNORE_PLAYER freezes cop AI -- see below).
                 Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, Game.Player, false);
                 Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
-                Notify("~g~Qualified Immunity V8.5:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V8.7:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1767,6 +1799,13 @@ namespace QualifiedImmunity
             }
             if (successor == null) return;
 
+            // The outgoing driver is invalid (dead or gone). If he's a corpse, KEEP a
+            // reference so his K.I.A. row stays on the unit HUD -- otherwise overwriting
+            // _driver here is exactly what made a dead driver "simply disappear" while a
+            // dead passenger correctly showed K.I.A.
+            if (_driver != null && _driver.Exists() && _driver.IsDead && !_fallen.Contains(_driver))
+                _fallen.Add(_driver);
+
             if (fromPartner) _partner = null;
             _driver = successor;
             MakeRideAlongDriver(_driver);
@@ -1838,24 +1877,36 @@ namespace QualifiedImmunity
         private struct UnitDef
         {
             public VehicleHash Model; public int Number; public string Hud; public PedHash Cop; public bool Partner;
-            public UnitDef(VehicleHash m, int n, string hud, PedHash cop, bool partner)
-            { Model = m; Number = n; Hud = hud; Cop = cop; Partner = partner; }
+            // Which livery to PIN on spawn. The roof number is painted by the livery, not
+            // settable to an arbitrary value -- so to make the HUD callsign match the roof,
+            // we lock the car to a known livery and set Number/Hud to the number THAT livery
+            // paints. Pinning also stops the number from changing ride-to-ride (the engine
+            // otherwise randomizes police liveries, which is the whole reason the roof and
+            // HUD disagreed). -1 = leave the model's default livery untouched.
+            public int Livery;
+            public UnitDef(VehicleHash m, int n, string hud, PedHash cop, bool partner, int livery)
+            { Model = m; Number = n; Hud = hud; Cop = cop; Partner = partner; Livery = livery; }
         }
 
         // The patrol fleet. Police3 keeps callsign 32 (its pinned livery paints "32" on
         // the roof, so that one matches exactly); the rest are distinct cruiser/SUV models
         // so you get visibly different units. Crew size is FIXED per unit (some solo, some
         // two-up) so a given callsign always has the same make-up.
+        // NOTE on the numbers: each callsign number is meant to equal the roof number the
+        // PINNED livery (last column) paints, so the HUD and the car agree. Every car is
+        // locked to livery 0 so its roof number is stable ride-to-ride. Police3's livery 0
+        // is confirmed to read "32". The others are pinned for stability and still need an
+        // in-game pass to confirm each livery-0 roof number and align the callsign to it.
         private static readonly UnitDef[] RegularUnits =
-        {
-            new UnitDef(VehicleHash.Police3,    32, "UNIT 32",    PedHash.Cop01SMY,     true),
-            new UnitDef(VehicleHash.Police,     18, "UNIT 18",    PedHash.Cop01SMY,     true),
-            new UnitDef(VehicleHash.Police2,    24, "UNIT 24",    PedHash.Cop01SMY,     false),
-            new UnitDef(VehicleHash.Police5,    41, "UNIT 41",    PedHash.Cop01SMY,     true),
-            new UnitDef(VehicleHash.Sheriff,     6, "SHERIFF 6",  PedHash.Cop01SMY,     true),
-            new UnitDef(VehicleHash.Sheriff2,    9, "SHERIFF 9",  PedHash.Cop01SMY,     false),
-            new UnitDef(VehicleHash.Pranger,     3, "RANGER 3",   PedHash.Ranger01SMY,  false),
-            new UnitDef(VehicleHash.PoliceOld2, 51, "UNIT 51",    PedHash.Cop01SMY,     false),
+        {                                                                       // livery
+            new UnitDef(VehicleHash.Police3,    32, "UNIT 32",    PedHash.Cop01SMY,     true,  0),
+            new UnitDef(VehicleHash.Police,      5, "UNIT 5",     PedHash.Cop01SMY,     true,  0),
+            new UnitDef(VehicleHash.Police2,    24, "UNIT 24",    PedHash.Cop01SMY,     false, 0),
+            new UnitDef(VehicleHash.Police5,    41, "UNIT 41",    PedHash.Cop01SMY,     true,  0),
+            new UnitDef(VehicleHash.Sheriff,     6, "SHERIFF 6",  PedHash.Cop01SMY,     true,  0),
+            new UnitDef(VehicleHash.Sheriff2,    9, "SHERIFF 9",  PedHash.Cop01SMY,     false, 0),
+            new UnitDef(VehicleHash.Pranger,     3, "RANGER 3",   PedHash.Ranger01SMY,  false, 0),
+            new UnitDef(VehicleHash.PoliceOld2, 51, "UNIT 51",    PedHash.Cop01SMY,     false, 0),
         };
 
         // Draw a regular unit, avoiding an immediate repeat so you don't get the same
@@ -2260,6 +2311,7 @@ namespace QualifiedImmunity
             if (_driver != null) { CopNames.Forget(_driver.Handle); if (_driver.Exists()) _driver.MarkAsNoLongerNeeded(); }
             if (_partner != null) { CopNames.Forget(_partner.Handle); if (_partner.Exists()) _partner.MarkAsNoLongerNeeded(); }
             ReleaseSquad();
+            ReleaseFallen();
             ReleaseDealPeds();
             TrafficCalm.ReleaseAll();
             _crookedAgent = false;
