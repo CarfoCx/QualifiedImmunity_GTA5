@@ -9,18 +9,51 @@ namespace QualifiedImmunity
         // -------------------------------------------------------------------
         // Field medicine -- tourniquet a wounded officer (PC + controller)
         // -------------------------------------------------------------------
+        // Downed-officer tracking. The KEY design point (and the reason earlier versions
+        // showed no prompt): we do NOT decide who's savable by reading Ped.IsInjured at
+        // prompt time. A downed officer is held SET_ENTITY_INVINCIBLE, and an invincible
+        // bleeding ped does not reliably report IsInjured -- so walking up to one found
+        // "no injured cop" and never prompted. Instead we keep a STICKY set of officers we
+        // put into the downed state; it only clears on revive, bleed-out, death, or despawn.
+        // The prompt, the blip and the marker all key off that set.
+        private sealed class Downed
+        {
+            public DateTime Since;
+            public Blip Blip;
+            public bool Unit;   // ride-along unit officer (vs an ambient-scene cop)
+        }
+        private readonly System.Collections.Generic.Dictionary<int, Downed> _downed =
+            new System.Collections.Generic.Dictionary<int, Downed>();
+        private readonly System.Collections.Generic.List<int> _downedReconcile =
+            new System.Collections.Generic.List<int>();
+        private DateTime _lastDownedAlert = DateTime.MinValue;
+        private const double BleedOutSeconds = 60.0;   // time to reach a downed officer before he's gone
+        private const float TourniquetReach = 4.5f;    // how close (m) you must be to apply it
+
+        // Show the "apply tourniquet" prompt when you reach a downed officer, and draw a
+        // marker over every downed officer so you're guided to them. Runs in ALL phases.
         private void TourniquetTick(Ped player)
         {
             if (!_enableTourniquet) return;
-            if (player == null || !player.Exists() || player.IsInVehicle()) return; // kneel beside them on foot
+            if (!Valid(player) || player.IsInVehicle()) return;   // kneel beside them on foot
+            if (_downed.Count == 0) return;
 
-            Ped patient = FindInjuredFriendlyCop(player, 3.5f);
-            if (patient == null) return;
+            Ped patient = null; float best = float.MaxValue;
+            _downedReconcile.Clear();
+            foreach (int h in _downed.Keys) _downedReconcile.Add(h);
+            foreach (int h in _downedReconcile)
+            {
+                Ped p = (Ped)Entity.FromHandle(h);
+                if (p == null || !p.Exists() || p.IsDead) continue;
+                DrawDownedMarker(p);                                   // "go here to save them"
+                float d = p.Position.DistanceTo(player.Position);
+                if (d < best) { best = d; patient = p; }
+            }
+            if (patient == null || best > TourniquetReach) return;     // the marker leads you in
 
             // ~INPUT_CONTEXT~ auto-renders the right glyph: the "E" key on PC, or the
             // matching face button on a controller -- so the same prompt fits both.
             ShowHelp("Press ~INPUT_CONTEXT~ to apply a ~b~tourniquet~w~ and stabilize the officer.");
-
             if (Function.Call<bool>(Hash.IS_CONTROL_JUST_PRESSED, 0, (int)GTA.Control.Context)
                 && (DateTime.Now - _lastTourniquet).TotalSeconds > 1.0)
             {
@@ -29,73 +62,126 @@ namespace QualifiedImmunity
             }
         }
 
-        // Any wounded-but-alive officer near the player -- your own unit OR an
-        // ambient cop who's down and bleeding out. (Not just ride-along officers.)
-        private Ped FindInjuredFriendlyCop(Ped player, float radius)
+        // A pulsing chevron above a downed officer so the player is visibly directed to them.
+        private void DrawDownedMarker(Ped p)
         {
-            Ped best = null;
-            float bestD = radius;
-            foreach (Ped c in WorldCache.GetNearbyPeds(player.Position, radius))
-            {
-                if (c == null || !c.Exists() || c.IsDead) continue;
-                if (!IsCopPed(c)) continue;                 // only patch up the police
-                if (!c.IsInjured) continue;                 // wounded but still alive -> savable
-                float d = c.Position.DistanceTo(player.Position);
-                if (d <= bestD) { bestD = d; best = c; }
-            }
-            return best;
+            var a = p.Position;
+            Function.Call(Hash.DRAW_MARKER, 2, a.X, a.Y, a.Z + 1.3f,
+                0f, 0f, 0f, 0f, 0f, 0f, 0.6f, 0.6f, 0.6f, 220, 40, 40, 160,
+                true, true, 2, false, 0, 0, false);
         }
 
         // -------------------------------------------------------------------
-        // Downed-officer window. Ride-along officers are set DiesWhenInjured=false
-        // (MakeOfficerDownable), so a fatal hit drops them into a bleeding-out injured
-        // state and keeps them ALIVE there instead of killing them. This tick gives
-        // that state structure: alert the player, hold the officer stable (invincible
-        // while down, so ongoing fire can't finish him) for a generous window, and only
-        // let him bleed out for real if nobody applies a tourniquet in time.
+        // Downed-officer window. The mod's cops are SET_PED_DIES_WHEN_INJURED=false, so a
+        // fatal hit drops them into a bleeding-out state ALIVE instead of killing them. This
+        // tick detects that transition (unit officers AND ambient-scene cops), pins them in a
+        // stable, savable downed state (invincible + flashing blip + alarm) for a generous
+        // window, and only lets them bleed out for real if nobody reaches them in time.
         // -------------------------------------------------------------------
-        private readonly System.Collections.Generic.Dictionary<int, DateTime> _downedSince =
-            new System.Collections.Generic.Dictionary<int, DateTime>();
-        private DateTime _lastDownedAlert = DateTime.MinValue;
-        private const double BleedOutSeconds = 60.0;   // time to reach a downed officer before he's gone
-
-        private void DownedOfficerTick()
+        private void DownedTick(Ped player)
         {
+            if (!_enableTourniquet) return;
+
+            // 1) Unit officers going down (a ride-along officer who's hit).
             foreach (Ped c in UnitOfficers())
             {
-                if (c == null || !c.Exists()) continue;
-                int h = c.Handle;
-                if (c.IsDead) { _downedSince.Remove(h); continue; }
-
-                if (c.IsInjured)   // injured-but-alive == bleeding out and savable
-                {
-                    DateTime since;
-                    if (!_downedSince.TryGetValue(h, out since))
-                    {
-                        // Just went down: freeze him stable so he can't be finished, and
-                        // sound the alarm so the player knows to run over with the kit.
-                        _downedSince[h] = DateTime.Now;
-                        Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
-                        Function.Call(Hash.SET_ENTITY_INVINCIBLE, c, true);   // protect the save window
-                        if ((DateTime.Now - _lastDownedAlert).TotalSeconds > 5.0)
-                        {
-                            _lastDownedAlert = DateTime.Now;
-                            Notify("~r~OFFICER DOWN!~w~ " + CopNames.For(c) + " is hit -- reach them and apply a ~b~tourniquet~w~ before they bleed out.");
-                            Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, "Beep_Red", "DLC_HEIST_HACKING_SNAKE_SOUNDS", true);
-                        }
-                    }
-                    else if ((DateTime.Now - since).TotalSeconds > BleedOutSeconds)
-                    {
-                        // Nobody got to him in time -> he bleeds out for real.
-                        _downedSince.Remove(h);
-                        Function.Call(Hash.SET_ENTITY_INVINCIBLE, c, false);
-                        Function.Call(Hash.SET_PED_DIES_WHEN_INJURED, c, true);
-                        Function.Call(Hash.SET_ENTITY_HEALTH, c, 0);
-                        Notify("~r~" + CopNames.For(c) + " bled out. Couldn't reach them in time.");
-                    }
-                }
-                else _downedSince.Remove(h);   // healed and back up
+                if (!Valid(c)) continue;
+                if (!_downed.ContainsKey(c.Handle) && c.IsInjured) MarkDowned(c, true);
             }
+
+            // 2) The mod's ambient-scene cops: keep them armed to bleed out (not insta-die),
+            //    and catch them when they go down. Only OUR cops; vanilla police are untouched.
+            foreach (Ped c in WorldCache.GetNearbyPeds(player.Position, 70f))
+            {
+                if (!Valid(c)) continue;
+                if (!RideAlongRegistry.FriendlyCops.Contains(c.Handle)) continue;
+                if (IsUnitOfficer(c) || _downed.ContainsKey(c.Handle)) continue;
+                if (c.IsInjured) MarkDowned(c, false);
+                else
+                {
+                    Function.Call(Hash.SET_PED_DIES_WHEN_INJURED, c, false);
+                    Function.Call(Hash.SET_PED_SUFFERS_CRITICAL_HITS, c, false);
+                }
+            }
+
+            // 3) Maintain / reconcile everyone currently down.
+            if (_downed.Count == 0) return;
+            _downedReconcile.Clear();
+            foreach (int h in _downed.Keys) _downedReconcile.Add(h);
+            foreach (int h in _downedReconcile)
+            {
+                Downed d = _downed[h];
+                Ped p = (Ped)Entity.FromHandle(h);
+
+                // Gone, dead, or no longer ours -> drop tracking + blip, restore mortality.
+                if (p == null || !p.Exists() || p.IsDead) { ReleaseDowned(h, p, false); continue; }
+                if (d.Unit && (_phase == Phase.Idle || !IsUnitOfficer(p))) { ReleaseDowned(h, p, false); continue; }
+                if (!d.Unit && !RideAlongRegistry.FriendlyCops.Contains(h)) { ReleaseDowned(h, p, false); continue; }
+
+                // Hold the save window open: re-assert protection in case something cleared it.
+                Function.Call(Hash.SET_ENTITY_INVINCIBLE, p, true);
+
+                if ((DateTime.Now - d.Since).TotalSeconds > BleedOutSeconds)
+                {
+                    bool unit = d.Unit;
+                    ReleaseDowned(h, p, false);                  // restores DiesWhenInjured + drops blip
+                    Function.Call(Hash.SET_ENTITY_HEALTH, p, 0); // bled out for real
+                    if (unit) Notify("~r~" + CopNames.For(p) + " bled out. Couldn't reach them in time.");
+                }
+            }
+        }
+
+        // Pin a cop into the savable downed state: hold him stable, blip him, sound the alarm.
+        private void MarkDowned(Ped c, bool unit)
+        {
+            Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
+            Function.Call(Hash.SET_ENTITY_INVINCIBLE, c, true);
+
+            Blip b = c.AddBlip();
+            if (b != null && b.Exists())
+            {
+                b.Color = BlipColor.Red;
+                b.IsFlashing = true;
+                try { b.Name = "Officer Down"; } catch { /* naming is best-effort */ }
+            }
+            _downed[c.Handle] = new Downed { Since = DateTime.Now, Blip = b, Unit = unit };
+
+            if ((DateTime.Now - _lastDownedAlert).TotalSeconds > 5.0)
+            {
+                _lastDownedAlert = DateTime.Now;
+                if (unit)
+                {
+                    Notify("~r~OFFICER DOWN!~w~ " + CopNames.For(c) + " is hit -- get to them and apply a ~b~tourniquet~w~ before they bleed out.");
+                    Function.Call(Hash.PLAY_SOUND_FRONTEND, -1, "Beep_Red", "DLC_HEIST_HACKING_SNAKE_SOUNDS", true);
+                }
+                else
+                {
+                    Notify("~r~Officer down nearby.~w~ Reach them on foot and apply a ~b~tourniquet~w~ to save them.");
+                }
+            }
+        }
+
+        // Drop a cop out of the downed state: remove the blip + tracking, lift invincibility,
+        // and (unless they were revived) restore normal mortality so a kill actually sticks.
+        private void ReleaseDowned(int h, Ped p, bool revived)
+        {
+            Downed d;
+            if (_downed.TryGetValue(h, out d))
+            {
+                if (d.Blip != null && d.Blip.Exists()) d.Blip.Delete();
+                _downed.Remove(h);
+            }
+            if (p != null && p.Exists())
+            {
+                Function.Call(Hash.SET_ENTITY_INVINCIBLE, p, false);
+                if (!revived) Function.Call(Hash.SET_PED_DIES_WHEN_INJURED, p, true);
+            }
+        }
+
+        private bool IsUnitOfficer(Ped c)
+        {
+            foreach (Ped u in UnitOfficers()) if (u == c) return true;
+            return false;
         }
 
         private void ApplyTourniquet(Ped player, Ped cop)
@@ -109,8 +195,11 @@ namespace QualifiedImmunity
             }
             catch { /* cosmetic only */ }
 
-            // Lift the downed-state protection and patch them back up to full.
-            _downedSince.Remove(cop.Handle);
+            // Clear downed tracking + its blip, lift protection, patch them up. Leave them
+            // DiesWhenInjured=false so they can be saved again if they're hit later.
+            Downed d;
+            if (_downed.TryGetValue(cop.Handle, out d) && d.Blip != null && d.Blip.Exists()) d.Blip.Delete();
+            _downed.Remove(cop.Handle);
             Function.Call(Hash.SET_ENTITY_INVINCIBLE, cop, false);
             int target = cop.MaxHealth > 100 ? cop.MaxHealth : 200;
             Function.Call(Hash.SET_ENTITY_HEALTH, cop, target);
@@ -147,11 +236,12 @@ namespace QualifiedImmunity
             if (_medicCop != null) { UpdateCrewMedic(); return; }
             if ((DateTime.Now - _lastCrewMedic).TotalSeconds < 12) return;
 
-            // A wounded unit officer who needs help (on the ground, not in a seat)...
+            // A downed unit officer who needs help (on the ground, not in a seat)...
             Ped patient = null;
             foreach (Ped c in UnitOfficers())
             {
-                if (!Valid(c) || !c.IsInjured || c.IsInVehicle()) continue;
+                if (!Valid(c) || c.IsInVehicle()) continue;
+                if (!_downed.ContainsKey(c.Handle)) continue;   // keyed off the sticky downed set
                 patient = c; break;
             }
             if (patient == null) return;
@@ -160,7 +250,7 @@ namespace QualifiedImmunity
             Ped medic = null;
             foreach (Ped c in UnitOfficers())
             {
-                if (!Valid(c) || c == patient || c.IsInjured) continue;
+                if (!Valid(c) || c == patient || _downed.ContainsKey(c.Handle)) continue;
                 if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, c, 0)) continue;
                 medic = c; break;
             }
@@ -177,7 +267,7 @@ namespace QualifiedImmunity
         private void UpdateCrewMedic()
         {
             Ped m = _medicCop, p = _medicPatient;
-            if (!Valid(m) || p == null || !p.Exists() || p.IsDead || !p.IsInjured)
+            if (!Valid(m) || p == null || !p.Exists() || p.IsDead || !_downed.ContainsKey(p.Handle))
             { EndCrewMedic(); return; }
             // Shooting starts -> drop the kit, raise the gun. Retry after the cooldown.
             if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, m, 0)) { EndCrewMedic(); return; }

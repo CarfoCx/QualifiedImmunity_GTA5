@@ -487,10 +487,18 @@ namespace QualifiedImmunity
         // True while a scripted enter-vehicle task is live on the ped (walking to the
         // door or playing the climb-in). 0x950B6492 = SCRIPT_TASK_ENTER_VEHICLE;
         // GET_SCRIPT_TASK_STATUS returns 7 when no such task is assigned.
+        // True while the officer is actively walking to / climbing into the cruiser.
+        // Uses the vehicle-entering natives, which are reliable here, INSTEAD of
+        // GET_SCRIPT_TASK_STATUS: that task-hash check kept reading "no task" even with a
+        // live walk-in, so the re-board watchdog thought every entry had stalled, cleared
+        // it, and reissued it every couple seconds -- the officer shuffled in place until
+        // the warp fallback ported him in. THE idle-then-teleport (and "crew bugged out
+        // until I re-enter") bug.
         private bool IsEnteringCruiser(Ped c)
         {
-            if (!Valid(c)) return false;
-            return Function.Call<int>(Hash.GET_SCRIPT_TASK_STATUS, c, unchecked((int)0x950B6492u)) != 7;
+            if (!Valid(c) || !Valid(_copCar)) return false;
+            if (Function.Call<bool>(Hash.IS_PED_GETTING_INTO_A_VEHICLE, c)) return true;
+            return Function.Call<int>(Hash.GET_VEHICLE_PED_IS_ENTERING, c) == _copCar.Handle;
         }
 
         // Elite squad re-boarding: same walk-in/warp discipline as the driver and

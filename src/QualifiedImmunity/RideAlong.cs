@@ -643,8 +643,10 @@ namespace QualifiedImmunity
         }
 
         // Your unit got wrecked or all its officers went down -> dispatch a fresh unit and
-        // keep the ride going, instead of just ending it. Capped by MaxReplacementUnits.
-        private void DispatchReplacementOrEnd(string reason)
+        // keep the ride going, instead of just ending it. Capped by MaxReplacementUnits,
+        // UNLESS forceReplace is set: a car that simply breaks down should never end a
+        // ride-along, so that path always calls another car and keeps the ride alive.
+        private void DispatchReplacementOrEnd(string reason, bool forceReplace = false)
         {
             // The replacement path leaves the Pursuit phase, so UpdateHeliCam stops running --
             // cut the feed here or it'd freeze with its optics (NV/thermal) stuck on screen.
@@ -662,17 +664,20 @@ namespace QualifiedImmunity
 
             Ped player = Game.Player.Character;
             if (player == null || !player.Exists()) { Cleanup(); return; }
-            if (_replacementsUsed >= _maxReplacementUnits)
+            if (!forceReplace && _replacementsUsed >= _maxReplacementUnits)
             {
                 // Default (0 replacements): losing your unit ENDS the ride -- no auto
                 // re-dispatch. Call dispatch again yourself if you want another unit.
+                // (A broken-down car uses forceReplace and never reaches here.)
                 Notify(_maxReplacementUnits == 0
                     ? reason + " Your ride-along is over. Call dispatch if you want another unit."
                     : reason + " No units left in the area. Ride-along over.");
                 Cleanup();
                 return;
             }
-            _replacementsUsed++;
+            // A forced (breakdown) replacement doesn't burn the combat-loss budget --
+            // the ride can survive any number of dead cars, just not a wiped-out crew.
+            if (!forceReplace) _replacementsUsed++;
             Notify(reason + " ~b~Dispatching a replacement unit...");
             ReleaseCurrentUnit();        // let the old wreck/bodies go back to the engine
             DespawnPursuitProps();       // drop any suspect/backup tied to the lost unit
@@ -1111,12 +1116,24 @@ namespace QualifiedImmunity
                 // not per-frame (hammering SET_POLICE_IGNORE_PLAYER freezes cop AI -- see below).
                 Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, Game.Player, false);
                 Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
-                Notify("~g~Qualified Immunity V8.7:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V9.8:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
             CheckCommands();
             PhoneTick();   // the cell-phone dispatch menu (works whether or not a ride is active)
+
+            // Field medicine works in ANY phase, not just mid-ride: you can stabilize any of
+            // the mod's downed cops -- your ride-along unit OR an ambient-scene officer who's
+            // bleeding out -- whether or not a ride-along is active. So the downed-cop hold
+            // and the tourniquet prompt run BEFORE the idle gate below.
+            Ped foot = Game.Player.Character;
+            if (foot != null && foot.Exists() && !foot.IsDead)
+            {
+                DownedTick(foot);       // detect/hold/release downed cops (unit + ambient), blips + bleed-out
+                TourniquetTick(foot);   // marker over each downed cop + "press E" prompt when you reach one
+            }
+
             if (_phase == Phase.Idle) return;
 
             // Player went down -> end the ride cleanly NOW. Otherwise the unit keeps
@@ -1136,8 +1153,10 @@ namespace QualifiedImmunity
             // system, so you're back to being fair game for the police).
             if (!AnyOfficerAlive()) { Notify("~r~Dispatch:~w~ Your entire unit is down. Ride-along over."); Cleanup(); return; }
 
-            // Cruiser wrecked but crew alive -> replacement (if the budget allows), else end.
-            if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's wrecked."); return; }
+            // Cruiser broke down / wrecked but crew alive -> ALWAYS call another car and keep
+            // the ride going. A dead vehicle never ends a ride-along (forceReplace bypasses the
+            // MaxReplacementUnits budget, which only governs combat losses of the whole crew).
+            if (!IsDriveable(_copCar)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Unit's vehicle is down.", true); return; }
             if (!Valid(_driver)) { DispatchReplacementOrEnd("~r~Dispatch:~w~ Officers are down."); return; }
 
             // Someone shooting at OUR cruiser/officers on patrol -> engage them.
@@ -1193,8 +1212,8 @@ namespace QualifiedImmunity
                 Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, Game.Player);
             }
 
-            DownedOfficerTick();  // hold wounded officers in a savable downed state
-            TourniquetTick(player);
+            // (DownedTick + TourniquetTick already ran above, before the idle gate, so the
+            // prompt works in every phase and for ambient cops too.)
             CrewMedicTick();      // officers patch up their own downed squadmates
             UnitProgressTick();   // XP for shooting/kills, level-ups
             BanterTick();         // partner small talk: compliments + suspect slander
@@ -1701,7 +1720,7 @@ namespace QualifiedImmunity
 
             string street = World.GetStreetName(spot);
             Notify("~r~Dispatch (radio):~w~ All units: shots fired near " + street + ". Closest unit, respond!");
-            Notify("~b~" + CopNames.For(_driver) + ":~w~ Unit 23 responding! That's us. We're Unit 23 today.");
+            Notify("~b~" + CopNames.For(_driver) + ":~w~ That's our sector - we're responding! Closest unit, that's us.");
             StartAssist(first);
             return true;
         }
@@ -1968,7 +1987,7 @@ namespace QualifiedImmunity
         // (alive, IS_PED_INJURED true) instead of killing him, so there's a real,
         // lasting window to reach him and apply a tourniquet. Critical-hit instakills
         // are off too, so a single rifle round can't skip the downed state. The
-        // bleed-out timer (DownedOfficerTick) is what finally kills him if nobody saves
+        // bleed-out timer (DownedTick) is what finally kills him if nobody saves
         // him in time. ResetProgression/spawn re-applies this each ride.
         private void MakeOfficerDownable(Ped p)
         {

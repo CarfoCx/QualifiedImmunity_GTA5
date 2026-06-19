@@ -167,13 +167,15 @@ namespace QualifiedImmunity
             foreach (Ped c in UnitOfficers()) if (OfficerRowVisible(c)) rows++;
             float y = 0.932f - 0.038f - rows * 0.060f - 0.034f;
 
-            // Regular cruisers are pinned to livery 0 at spawn (SpawnUnit), whose roof
-            // decal reads 32 -- so the HUD callsign matches the number on the roof.
+            // Label by UNIT TYPE, not a number. The roof number is baked into the car's
+            // livery decal and can't be read back reliably, so a HUD callsign like
+            // "UNIT 32" would disagree with whatever is actually painted on the roof --
+            // a type label can't be wrong.
             string title = _eliteUnit == 1 ? "NOOSE UNIT"
                          : _eliteUnit == 2 ? "FIB UNIT"
                          : _eliteUnit == 3 ? "AGENCY UNIT"
-                         : _undercover ? "UNMARKED"
-                         : _usesRoster ? _unitHud : "UNIT 32";
+                         : _undercover ? "UNMARKED UNIT"
+                         : "LSPD PATROL";
             Rect(x + w / 2f, y + 0.015f, w, 0.030f, 12, 28, 56, 160);
             DrawMenuText(title, x + 0.006f, y + 0.003f, 0.28f, 4, 235, 235, 235, false, true);
             y += 0.034f;

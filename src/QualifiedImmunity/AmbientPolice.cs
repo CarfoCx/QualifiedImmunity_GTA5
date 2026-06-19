@@ -24,9 +24,9 @@ namespace QualifiedImmunity
     {
         // ---- Config ([AmbientPolice] in QualifiedImmunity.ini) ----
         private bool _enabled = true;
-        private int _maxEvents = 2;
-        private float _spawnIntervalMin = 90f;
-        private float _spawnIntervalMax = 170f;
+        private int _maxEvents = 1;
+        private float _spawnIntervalMin = 180f;
+        private float _spawnIntervalMax = 330f;
         private float _spawnDistMin = 60f;
         private float _spawnDistMax = 130f;
         private float _startupGraceSeconds = 60f;  // stage NOTHING for this long after load
@@ -59,6 +59,15 @@ namespace QualifiedImmunity
         private double _nextDelay = 12.0;
         private int _copGroup, _suspGroup;
         private bool _rels;
+
+        // Driving-style bitfield for cop drivers, mirroring the ride-along's proven
+        // RIDE_DRIVE_STYLE (see RideAlong.cs): weave through traffic and run lights, but
+        // with EVERY avoidance flag on -- swerve moving cars (4), steer around parked
+        // cars (8), peds (16) and objects (32), plus wrong-way (512) so the AI holds
+        // speed instead of snapping a lane into an obstacle. The plain "rushed" style
+        // (786603) we used before only avoided moving cars, so cruisers clipped parked
+        // cars and street furniture. Used for both backup response drives and pursuit.
+        private const int DriveStyleAvoid = 787004;
 
         public AmbientPolice()
         {
@@ -203,20 +212,21 @@ namespace QualifiedImmunity
             if (_eventsSpawned < 2)
                 return _rng.Next(2) == 0 ? EType.TrafficStop : EType.Arrest;
 
-            // Still weighted toward routine, calm stops/arrests -- those remain the MAJORITY
-            // (62%) so the world doesn't constantly erupt. The spectacular scenes (pursuit,
-            // drug bust, SWAT raid, foot-chase shootout, gunfight, gang) share the remaining
-            // ~38% so they stay special highlights you stumble onto, not the norm.
+            // Heavily weighted toward routine, calm stops/arrests -- those are now the
+            // dominant MAJORITY (~75%) so the world stays quiet. The spectacular scenes
+            // share the rest, and the CHASES in particular (car pursuit + foot chase) are
+            // deliberately the rarest of the bunch (5% combined) so they stay a rare
+            // highlight you stumble onto, not a constant backdrop of sirens.
             int r = _rng.Next(100);
-            if (r < 38) return EType.TrafficStop; // 38%  \
-            if (r < 62) return EType.Arrest;      // 24%   } 62% calm
-            if (r < 70) return EType.Resist;      //  8%   (taze-and-cuff)
-            if (r < 78) return EType.Pursuit;     //  8%   car chase
-            if (r < 84) return EType.DrugBust;    //  6%   raid on a dealer crew
-            if (r < 89) return EType.Gunfight;    //  5%
-            if (r < 93) return EType.FootChase;   //  4%   bail-out foot pursuit
-            if (r < 97) return EType.SwatRaid;    //  4%   NOOSE breach
-            return EType.Gang;                     //  3%
+            if (r < 46) return EType.TrafficStop; // 46%  \
+            if (r < 75) return EType.Arrest;      // 29%   } 75% calm
+            if (r < 83) return EType.Resist;      //  8%   (taze-and-cuff, stationary)
+            if (r < 88) return EType.DrugBust;    //  5%   raid on a dealer crew (stationary)
+            if (r < 92) return EType.Gunfight;    //  4%   (stationary)
+            if (r < 95) return EType.Pursuit;     //  3%   car chase
+            if (r < 97) return EType.SwatRaid;    //  2%   NOOSE breach (stationary)
+            if (r < 99) return EType.FootChase;   //  2%   bail-out foot pursuit
+            return EType.Gang;                     //  1%
         }
 
         // A pulled-over scene: civ vehicle at the node, cruiser behind with lights on, an
@@ -459,7 +469,8 @@ namespace QualifiedImmunity
                     GiveCopWeapon(d, ev.Type == EType.Gang);
                     ev.Backup.Add(d);
                     Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, d, v,
-                        ev.Where.X, ev.Where.Y, ev.Where.Z, 22.0f, 786603, 12.0f);
+                        ev.Where.X, ev.Where.Y, ev.Where.Z, 22.0f, DriveStyleAvoid, 12.0f);
+                    TuneDriver(d);
                 }
                 if (Valid(g)) { GiveCopWeapon(g, ev.Type == EType.Gang); ev.Backup.Add(g); }
             }
@@ -505,6 +516,19 @@ namespace QualifiedImmunity
             if (!Valid(copDriver)) return;
             Function.Call(Hash.TASK_VEHICLE_CHASE, copDriver, susp);
             Function.Call(Hash.SET_TASK_VEHICLE_CHASE_IDEAL_PURSUIT_DISTANCE, copDriver, 12.0f);
+            TuneDriver(copDriver);
+        }
+
+        // Make a cop driver a competent, collision-aware driver: max skill, calmer
+        // aggression (less ramming/clipping), and a driving style that swerves around
+        // moving traffic and pedestrians. SET_DRIVE_TASK_DRIVING_STYLE applies to whatever
+        // drive/chase task is currently active, so this must run AFTER the task is issued.
+        private void TuneDriver(Ped d)
+        {
+            if (!Valid(d)) return;
+            Function.Call(Hash.SET_DRIVER_ABILITY, d, 1.0f);          // skilled -- handles traffic cleanly
+            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, d, 0.35f);  // calmer -- fewer collisions
+            Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, d, DriveStyleAvoid);
         }
 
         private bool UpdatePursuit(Ev ev, Ped player, double age)
