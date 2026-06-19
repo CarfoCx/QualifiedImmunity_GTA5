@@ -323,8 +323,14 @@ namespace QualifiedImmunity
             else if (!_engaged && !_pitting)
             {
                 // Re-kick the chase on a timer (the task goes inert otherwise on this engine).
+                // The stuck-breaker also fires here: a cruiser grinding on a corner/parked
+                // car during the chase (moving, but going nowhere) gets popped loose and the
+                // chase re-issued, instead of derby-ing the obstacle for the whole pursuit.
                 bool driverAboard = Valid(_driver) && _driver.IsInVehicle(_copCar);
-                if (CarStalled() && (DateTime.Now - _lastReissue).TotalSeconds > 2.5)
+                bool chaseStuck = driverAboard && NavStuck();
+                if (chaseStuck) { NavDislodge(); _lastReissue = DateTime.MinValue; }
+                if ((CarStalled() || chaseStuck) && DateTime.Now >= _navDislodgeUntil
+                    && (DateTime.Now - _lastReissue).TotalSeconds > 2.5)
                 {
                     _lastReissue = DateTime.Now;
                     if (driverAboard)

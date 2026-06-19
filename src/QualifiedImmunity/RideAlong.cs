@@ -64,6 +64,7 @@ namespace QualifiedImmunity
         private bool _usesRoster;     // false for elite/undercover (they keep their own designation)
         private int _unitNumber;      // the roster key for this ride's unit
         private string _unitHud = "UNIT 32";   // HUD callsign for this unit
+        private string _unitTitle = "LSPD PATROL";  // agency banner on the unit HUD (matches the car)
         private int _lastUnitNumber = -1;       // avoid drawing the same unit twice in a row
 
         // Unit-downed recovery state.
@@ -479,12 +480,54 @@ namespace QualifiedImmunity
             }
         }
 
-        private void SetPhase(Phase p) { _phase = p; _phaseSince = DateTime.Now; RideAlongRegistry.Active = (p != Phase.Idle); }
+        private void SetPhase(Phase p) { _phase = p; _phaseSince = DateTime.Now; RideAlongRegistry.Active = (p != Phase.Idle); NavReset(); }
         private double SecondsInPhase { get { return (DateTime.Now - _phaseSince).TotalSeconds; } }
 
         // True when the cruiser hasn't moved for a few seconds -- our cue to (re)issue
         // a drive/chase task. A moving cruiser is left alone so its task isn't restarted.
         private bool CarStalled() { return (DateTime.Now - _lastCarMoving).TotalSeconds > 3.5; }
+
+        // -------------------------------------------------------------------
+        // Systematic stuck-breaker. The classic AI failure -- ram an obstacle, reverse,
+        // ram it again, forever -- keeps the car MOVING the whole time (speed > 0), so the
+        // speed-based CarStalled never catches it. We instead watch NET progress: sample the
+        // car's position and, if it hasn't actually got anywhere over a window while it's
+        // meant to be driving, declare it stuck, pop it backward to break contact, and force
+        // the phase to re-plan a fresh road route. This is what makes navigation reliable.
+        // -------------------------------------------------------------------
+        private Vector3 _navAnchor;
+        private DateTime _navAnchorAt = DateTime.MinValue;
+        private DateTime _navDislodgeUntil = DateTime.MinValue;
+        private const float NavProgressMeters = 8f;    // must net-move this far per window...
+        private const double NavWindowSeconds = 5.0;   // ...or it's stuck (oscillating in place)
+
+        private void NavReset() { _navAnchorAt = DateTime.MinValue; _navDislodgeUntil = DateTime.MinValue; }
+
+        // True (once) when the cruiser has failed to make net progress -- it's grinding on
+        // something. Only meaningful while it's actually trying to drive (driver seated).
+        private bool NavStuck()
+        {
+            if (!Valid(_copCar) || !Valid(_driver) || !_driver.IsInVehicle(_copCar)) { _navAnchorAt = DateTime.MinValue; return false; }
+            if (DateTime.Now < _navDislodgeUntil) return false;   // mid-dislodge; give it a beat
+            Vector3 pos = _copCar.Position;
+            if (_navAnchorAt == DateTime.MinValue) { _navAnchor = pos; _navAnchorAt = DateTime.Now; return false; }
+            if (pos.DistanceTo(_navAnchor) > NavProgressMeters) { _navAnchor = pos; _navAnchorAt = DateTime.Now; return false; } // progress
+            if ((DateTime.Now - _navAnchorAt).TotalSeconds < NavWindowSeconds) return false;             // not long enough yet
+            _navAnchor = pos; _navAnchorAt = DateTime.Now;        // reset the window for the next check
+            return true;
+        }
+
+        // Break contact with whatever the car is wedged on: a brief, deterministic backward
+        // pop (independent of fiddly TEMP_ACTION codes) so the subsequent re-planned route
+        // doesn't just drive straight back into the same obstacle.
+        private void NavDislodge()
+        {
+            if (!Valid(_copCar) || !Valid(_driver)) return;
+            Function.Call(Hash.SET_PED_AS_COP, _driver, false);
+            Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 3, 1300);   // reverse (best-effort)
+            Function.Call(Hash.SET_VEHICLE_FORWARD_SPEED, _copCar, -5f);               // guaranteed backward pop
+            _navDislodgeUntil = DateTime.Now.AddSeconds(1.4);
+        }
 
         // -------------------------------------------------------------------
         // Cell-phone dispatch menu -- "call" the ride-along instead of a raw key.
@@ -776,6 +819,7 @@ namespace QualifiedImmunity
             {
                 carModel = VehicleHash.Police4;
                 copModel = PedHash.Business01AMY;
+                _unitTitle = "UNMARKED UNIT";
             }
             else if (_rng.Next(100) < _eliteUnitChance)
             {
@@ -785,6 +829,7 @@ namespace QualifiedImmunity
                     case 1: _eliteUnit = 2; carModel = VehicleHash.FBI2; copModel = PedHash.FibSec01SMM;   break;
                     default: _eliteUnit = 3; carModel = VehicleHash.FBI; copModel = PedHash.CiaSec01SMM;   break;
                 }
+                _unitTitle = _eliteUnit == 1 ? "NOOSE UNIT" : _eliteUnit == 2 ? "FIB UNIT" : "AGENCY UNIT";
                 // Sometimes the FIB "unit" is one agent, alone, with a side business:
                 // instead of chasing criminals he drives his errands -- selling seized
                 // guns and product to the gangs (see RideAlong.Crooked.cs).
@@ -799,6 +844,7 @@ namespace QualifiedImmunity
                 _usesRoster = true;
                 _unitNumber = rosterDef.Number;
                 _unitHud = rosterDef.Hud;
+                _unitTitle = rosterDef.Title;
                 carModel = rosterDef.Model;
                 copModel = rosterDef.Cop;
             }
@@ -922,6 +968,23 @@ namespace QualifiedImmunity
                     OutfitEliteUnit(sq);
                     CopNames.ForceEliteRank(sq, eliteTitle, eliteShort);
                 }
+            }
+
+            // Crew rank matched to the VEHICLE that showed up. Undercover stings are
+            // plainclothes DETECTIVES (never rookie "Officers"); Sheriff/Ranger/Metro cars
+            // field officers above rookie via a rank FLOOR (pricier unit -> higher rank).
+            // Both only ever RAISE rank, so a veteran persistent crew keeps what they earned.
+            if (_undercover)
+            {
+                CopNames.ForceEliteRank(_driver, "Detective", "Det.");
+                if (Valid(_partner)) CopNames.ForceEliteRank(_partner, "Detective", "Det.");
+                foreach (Ped sq in _squad) CopNames.ForceEliteRank(sq, "Detective", "Det.");
+            }
+            else if (_usesRoster && rosterDef.RankFloor > 0)
+            {
+                SetUnitRankFloor(_driver, rosterDef.RankFloor);
+                if (Valid(_partner)) SetUnitRankFloor(_partner, rosterDef.RankFloor);
+                foreach (Ped sq in _squad) SetUnitRankFloor(sq, rosterDef.RankFloor);
             }
 
             // Drive to the player's nearest road. The first task is issued the same
@@ -1116,7 +1179,7 @@ namespace QualifiedImmunity
                 // not per-frame (hammering SET_POLICE_IGNORE_PLAYER freezes cop AI -- see below).
                 Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, Game.Player, false);
                 Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
-                Notify("~g~Qualified Immunity V9.8:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
+                Notify("~g~Qualified Immunity V9.9:~w~ ride-along ready. Press ~b~" + _requestKey + "~w~ on foot to call dispatch.");
             }
 
             PollController();
@@ -1317,13 +1380,19 @@ namespace QualifiedImmunity
                         // (it never gets off 0.0). Leave the task alone so it can actually run.
                         // While the curb pull-over is in progress the drive task is NOT
                         // refreshed -- a re-issued drive would cancel the park maneuver.
+                        // Stuck-breaker: grinding on an obstacle (moving, but no net progress)
+                        // pops it loose and forces a fresh road route, instead of grinding
+                        // there until the give-up timer fails the whole call.
+                        if (!_pullingOver && NavStuck()) { NavDislodge(); _lastReissue = DateTime.MinValue; }
+
                         bool isFirstIssue = (_lastReissue == DateTime.MinValue);
                         double sinceReissue = (DateTime.Now - _lastReissue).TotalSeconds;
                         // Keep refreshing the destination until it's right on top of the player,
                         // and refresh FASTER once it's close so it noses all the way up instead
                         // of coasting to a stop a few meters short and making you walk.
                         double reissueGap = dist < 35f ? 3.5 : 10.0;
-                        if (!_pullingOver && dist >= 6f && (isFirstIssue || sinceReissue > reissueGap))
+                        if (!_pullingOver && dist >= 6f && DateTime.Now >= _navDislodgeUntil
+                            && (isFirstIssue || sinceReissue > reissueGap))
                         {
                             _lastReissue = DateTime.Now;
                             IssueEnRouteDrive(player, isFirstIssue);
@@ -1463,13 +1532,17 @@ namespace QualifiedImmunity
                             }
                         }
                         else _driverOutSince = DateTime.MinValue;
-                        // Patrol: re-kick the wander on a timer so it keeps driving (the task
-                        // goes inert otherwise). 6s is long enough not to feel erratic.
-                        // Only while the driver is actually behind the wheel -- handing a
-                        // vehicle task to a driver who's OUT (playing medic for a downed
-                        // squadmate) yanks him off the patient and back toward the car.
-                        if (Valid(_driver) && _driver.IsInVehicle(_copCar)
-                            && CarStalled() && (DateTime.Now - _lastWander).TotalSeconds > 6.0)
+                        // Patrol driving. Re-kick the wander on a timer so it keeps driving
+                        // (the task goes inert otherwise), AND break the crash-reverse loop:
+                        // if the cruiser is grinding on something (moving but making no net
+                        // progress), pop it loose and force a fresh route. Only while the
+                        // driver is behind the wheel -- handing a vehicle task to a driver
+                        // who's OUT (playing medic for a downed squadmate) yanks him back.
+                        bool drvSeated = Valid(_driver) && _driver.IsInVehicle(_copCar);
+                        if (drvSeated && NavStuck()) { NavDislodge(); _lastWander = DateTime.MinValue; }
+                        if (drvSeated && DateTime.Now >= _navDislodgeUntil
+                            && (CarStalled() || _lastWander == DateTime.MinValue
+                                || (DateTime.Now - _lastWander).TotalSeconds > 6.0))
                         {
                             _lastWander = DateTime.Now;
                             Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _driver, _copCar, 18.0f, DRIVE_STYLE);
@@ -1903,8 +1976,12 @@ namespace QualifiedImmunity
             // otherwise randomizes police liveries, which is the whole reason the roof and
             // HUD disagreed). -1 = leave the model's default livery untouched.
             public int Livery;
-            public UnitDef(VehicleHash m, int n, string hud, PedHash cop, bool partner, int livery)
-            { Model = m; Number = n; Hud = hud; Cop = cop; Partner = partner; Livery = livery; }
+            // The agency banner shown on the unit HUD (so a Sheriff car reads "SHERIFF DEPT",
+            // not "LSPD PATROL"), and the MINIMUM rank the crew starts at -- pricier/heavier
+            // units field higher-ranked officers, so a Sheriff/Ranger isn't a rookie "Officer".
+            public string Title; public int RankFloor;
+            public UnitDef(VehicleHash m, int n, string hud, PedHash cop, bool partner, int livery, string title, int rankFloor)
+            { Model = m; Number = n; Hud = hud; Cop = cop; Partner = partner; Livery = livery; Title = title; RankFloor = rankFloor; }
         }
 
         // The patrol fleet. Police3 keeps callsign 32 (its pinned livery paints "32" on
@@ -1917,15 +1994,15 @@ namespace QualifiedImmunity
         // is confirmed to read "32". The others are pinned for stability and still need an
         // in-game pass to confirm each livery-0 roof number and align the callsign to it.
         private static readonly UnitDef[] RegularUnits =
-        {                                                                       // livery
-            new UnitDef(VehicleHash.Police3,    32, "UNIT 32",    PedHash.Cop01SMY,     true,  0),
-            new UnitDef(VehicleHash.Police,      5, "UNIT 5",     PedHash.Cop01SMY,     true,  0),
-            new UnitDef(VehicleHash.Police2,    24, "UNIT 24",    PedHash.Cop01SMY,     false, 0),
-            new UnitDef(VehicleHash.Police5,    41, "UNIT 41",    PedHash.Cop01SMY,     true,  0),
-            new UnitDef(VehicleHash.Sheriff,     6, "SHERIFF 6",  PedHash.Cop01SMY,     true,  0),
-            new UnitDef(VehicleHash.Sheriff2,    9, "SHERIFF 9",  PedHash.Cop01SMY,     false, 0),
-            new UnitDef(VehicleHash.Pranger,     3, "RANGER 3",   PedHash.Ranger01SMY,  false, 0),
-            new UnitDef(VehicleHash.PoliceOld2, 51, "UNIT 51",    PedHash.Cop01SMY,     false, 0),
+        {                                                                       // livery  title           rankFloor
+            new UnitDef(VehicleHash.Police3,    32, "UNIT 32",    PedHash.Cop01SMY,     true,  0, "LSPD PATROL",   0),
+            new UnitDef(VehicleHash.Police,      5, "UNIT 5",     PedHash.Cop01SMY,     true,  0, "LSPD PATROL",   0),
+            new UnitDef(VehicleHash.Police2,    24, "UNIT 24",    PedHash.Cop01SMY,     false, 0, "LSPD PATROL",   0),
+            new UnitDef(VehicleHash.Police5,    41, "UNIT 41",    PedHash.Cop01SMY,     true,  0, "LSPD METRO",    1),
+            new UnitDef(VehicleHash.Sheriff,     6, "SHERIFF 6",  PedHash.Cop01SMY,     true,  0, "SHERIFF DEPT",  2),
+            new UnitDef(VehicleHash.Sheriff2,    9, "SHERIFF 9",  PedHash.Cop01SMY,     false, 0, "SHERIFF DEPT",  2),
+            new UnitDef(VehicleHash.Pranger,     3, "RANGER 3",   PedHash.Ranger01SMY,  false, 0, "PARK RANGER",   1),
+            new UnitDef(VehicleHash.PoliceOld2, 51, "UNIT 51",    PedHash.Cop01SMY,     false, 0, "LSPD PATROL",   0),
         };
 
         // Draw a regular unit, avoiding an immediate repeat so you don't get the same

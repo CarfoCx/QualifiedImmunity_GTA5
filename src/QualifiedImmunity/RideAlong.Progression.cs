@@ -31,6 +31,14 @@ namespace QualifiedImmunity
         private const double FlatlineHoldSeconds = 5.0;
         private const double FlatlineFadeSeconds = 2.0;
 
+        // K.I.A. roster for the CURRENT patrol. We capture a fallen officer's name the
+        // instant they die, so their flatline row stays on the monitor for the rest of the
+        // ride even after the body despawns (the unit drives off into the next pursuit and
+        // the corpse is left behind -- which used to make the row vanish). Cleared when the
+        // ride ends, so it always reflects THIS patrol's losses.
+        private sealed class KiaRec { public int Handle; public string Hud; }
+        private readonly List<KiaRec> _kia = new List<KiaRec>();
+
         private bool AnyOfficerAlive()
         {
             foreach (Ped c in UnitOfficers())
@@ -112,6 +120,27 @@ namespace QualifiedImmunity
             else if (!_lvl.ContainsKey(h)) _lvl[h] = oldLvl;
         }
 
+        // Start an officer at a MINIMUM rank (and matching level), so a higher-value unit
+        // fields higher-ranked officers from the outset instead of rookies. Only ever raises
+        // -- a persistent crew that already out-ranks the floor keeps their earned standing.
+        // Keeps the HUD "Lv" chip in step with the rank title (Lv 3 == Sergeant, etc.).
+        private void SetUnitRankFloor(Ped c, int floorRankIdx)
+        {
+            if (!Valid(c) || floorRankIdx <= 0) return;
+            int h = c.Handle;
+            int floorLvl = Math.Min(MaxLevel, floorRankIdx + 1);   // rank index N -> Level N+1
+            int curLvl; if (!_lvl.TryGetValue(h, out curLvl)) curLvl = 1;
+            if (curLvl >= floorLvl) return;                        // already at/above the floor
+
+            _lvl[h] = floorLvl;
+            int floorXp = floorRankIdx * XpPerLevel;
+            int curXp; _xp.TryGetValue(h, out curXp);
+            if (curXp < floorXp) _xp[h] = floorXp;
+
+            CopNames.PromoteTo(c, floorRankIdx);
+            ApplyRankTactics(c, floorLvl);
+        }
+
         // The "tactics" half of a promotion: better habits in a fight (the accuracy,
         // ego/combat-ability and armament half lives in CopNames.PromoteTo). Strictly
         // no HP/armour here -- ranking up never makes an officer tougher to kill.
@@ -145,6 +174,7 @@ namespace QualifiedImmunity
             _lvl.Clear();
             _xpCorpses.Clear();
             _flatlineAt.Clear();
+            _kia.Clear();
         }
 
         // -------------------------------------------------------------------
@@ -162,26 +192,29 @@ namespace QualifiedImmunity
             // the operators hanging off its sides) run up to seven officers deep, so
             // the list grows UPWARD instead of running off the bottom of the screen.
             // (With the usual two-man car this lands at the same y = 0.74 as before.)
+            RecordKia();   // capture any newly-fallen officer's name before the body can despawn
+
             const float x = 0.850f, w = 0.140f;
             int rows = 0;
             foreach (Ped c in UnitOfficers()) if (OfficerRowVisible(c)) rows++;
+            foreach (KiaRec rec in _kia) if (KiaRowVisible(rec)) rows++;
             float y = 0.932f - 0.038f - rows * 0.060f - 0.034f;
 
-            // Label by UNIT TYPE, not a number. The roof number is baked into the car's
-            // livery decal and can't be read back reliably, so a HUD callsign like
-            // "UNIT 32" would disagree with whatever is actually painted on the roof --
-            // a type label can't be wrong.
-            string title = _eliteUnit == 1 ? "NOOSE UNIT"
-                         : _eliteUnit == 2 ? "FIB UNIT"
-                         : _eliteUnit == 3 ? "AGENCY UNIT"
-                         : _undercover ? "UNMARKED UNIT"
-                         : "LSPD PATROL";
+            // Banner = the agency of whatever vehicle actually showed up (set at spawn from
+            // the unit's type/model), so a Sheriff car reads "SHERIFF DEPT" and an unmarked
+            // sting "UNMARKED UNIT" -- never a blanket "LSPD PATROL". Labelling by type (not
+            // a roof number) also can't disagree with the livery decal we can't read back.
             Rect(x + w / 2f, y + 0.015f, w, 0.030f, 12, 28, 56, 160);
-            DrawMenuText(title, x + 0.006f, y + 0.003f, 0.28f, 4, 235, 235, 235, false, true);
+            DrawMenuText(_unitTitle, x + 0.006f, y + 0.003f, 0.28f, 4, 235, 235, 235, false, true);
             y += 0.034f;
 
             foreach (Ped c in UnitOfficers())
                 y = DrawOfficerRow(c, x, y, w);
+
+            // Persistent K.I.A. rows for fallen officers whose body has despawned -- drawn
+            // from the captured record so the flatline survives the next pursuit.
+            foreach (KiaRec rec in _kia)
+                if (!IsHandleLiveInUnit(rec.Handle)) y = DrawKiaRow(rec, x, y, w);
 
             // Cruiser body health (entity health, 0-1000).
             float vh = Math.Max(0f, Math.Min(1f, _copCar.Health / 1000f));
@@ -200,6 +233,62 @@ namespace QualifiedImmunity
             DateTime at;
             if (AnyOfficerAlive() || !_flatlineAt.TryGetValue(c.Handle, out at)) return true;
             return (DateTime.Now - at).TotalSeconds <= FlatlineHoldSeconds + FlatlineFadeSeconds;
+        }
+
+        // Capture the name of any officer that has just died, while their ped still exists,
+        // so the K.I.A. flatline can be drawn from the record after the body despawns.
+        private void RecordKia()
+        {
+            foreach (Ped c in UnitOfficers())
+            {
+                if (c == null || !c.Exists() || !c.IsDead) continue;
+                int h = c.Handle;
+                bool known = false;
+                foreach (KiaRec r in _kia) if (r.Handle == h) { known = true; break; }
+                if (!known) _kia.Add(new KiaRec { Handle = h, Hud = CopNames.HudFor(c) });
+            }
+        }
+
+        private bool IsHandleLiveInUnit(int h)
+        {
+            foreach (Ped c in UnitOfficers())
+                if (c != null && c.Exists() && c.Handle == h) return true;
+            return false;
+        }
+
+        // A KIA record draws as its own row only once its ped is gone; same hold+fade window
+        // as a dead-in-slot officer, so it persists while the patrol continues.
+        private bool KiaRowVisible(KiaRec rec)
+        {
+            if (IsHandleLiveInUnit(rec.Handle)) return false;   // still drawn by its slot row
+            DateTime at;
+            if (AnyOfficerAlive() || !_flatlineAt.TryGetValue(rec.Handle, out at)) return true;
+            return (DateTime.Now - at).TotalSeconds <= FlatlineHoldSeconds + FlatlineFadeSeconds;
+        }
+
+        private float DrawKiaRow(KiaRec rec, float x, float y, float w)
+        {
+            DateTime at;
+            if (AnyOfficerAlive() || !_flatlineAt.TryGetValue(rec.Handle, out at))
+            { at = DateTime.Now; _flatlineAt[rec.Handle] = at; }
+            double s = (DateTime.Now - at).TotalSeconds;
+            if (s > FlatlineHoldSeconds + FlatlineFadeSeconds) return y;
+            float fade = 1f;
+            if (s > FlatlineHoldSeconds) fade = 1f - (float)((s - FlatlineHoldSeconds) / FlatlineFadeSeconds);
+
+            const float rowH = 0.056f;
+            Rect(x + w / 2f, y + rowH / 2f, w, rowH, 0, 0, 0, (int)(100 * fade));
+            DrawMenuText(rec.Hud, x + 0.006f, y + 0.002f, 0.24f, 0, 235, 235, 235, false, true, (int)(255 * fade));
+            DrawHudTextRight("K.I.A.", x + w - 0.006f, y + 0.002f, 0.24f, 235, 60, 60, (int)(255 * fade));
+            DrawFlatline(x + 0.006f, y + 0.035f, w - 0.012f, 0.010f, fade);
+            return y + rowH + 0.004f;
+        }
+
+        // The flatline ECG for a fallen officer whose ped is gone (no live ped to read).
+        private void DrawFlatline(float left, float cy, float w, float halfH, float fade)
+        {
+            Rect(left + w / 2f, cy, w, halfH * 2f + 0.003f, 0, 0, 0, (int)(130 * fade));  // monitor backing
+            Rect(left + w / 2f, cy, w, 0.0022f, 235, 45, 45, (int)(245 * fade));           // flatline
         }
 
         private float DrawOfficerRow(Ped c, float x, float y, float w)
