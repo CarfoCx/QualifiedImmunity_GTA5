@@ -328,7 +328,7 @@ namespace QualifiedImmunity
                 // chase re-issued, instead of derby-ing the obstacle for the whole pursuit.
                 bool driverAboard = Valid(_driver) && _driver.IsInVehicle(_copCar);
                 bool chaseStuck = driverAboard && NavStuck();
-                if (chaseStuck) { NavDislodge(); _lastReissue = DateTime.MinValue; }
+                if (chaseStuck) { if (NavShouldReverse()) NavDislodge(); _lastReissue = DateTime.MinValue; }
                 if ((CarStalled() || chaseStuck) && DateTime.Now >= _navDislodgeUntil
                     && (DateTime.Now - _lastReissue).TotalSeconds > 2.5)
                 {

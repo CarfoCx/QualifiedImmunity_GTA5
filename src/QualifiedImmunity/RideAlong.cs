@@ -498,10 +498,12 @@ namespace QualifiedImmunity
         private Vector3 _navAnchor;
         private DateTime _navAnchorAt = DateTime.MinValue;
         private DateTime _navDislodgeUntil = DateTime.MinValue;
+        private bool _navMoved;        // car exceeded a real speed at some point this window
+        private bool _navWasMoving;    // latched: was it moving when the stuck fired? (oscillation vs. parked)
         private const float NavProgressMeters = 8f;    // must net-move this far per window...
         private const double NavWindowSeconds = 5.0;   // ...or it's stuck (oscillating in place)
 
-        private void NavReset() { _navAnchorAt = DateTime.MinValue; _navDislodgeUntil = DateTime.MinValue; }
+        private void NavReset() { _navAnchorAt = DateTime.MinValue; _navDislodgeUntil = DateTime.MinValue; _navMoved = false; }
 
         // True (once) when the cruiser has failed to make net progress -- it's grinding on
         // something. Only meaningful while it's actually trying to drive (driver seated).
@@ -510,11 +512,24 @@ namespace QualifiedImmunity
             if (!Valid(_copCar) || !Valid(_driver) || !_driver.IsInVehicle(_copCar)) { _navAnchorAt = DateTime.MinValue; return false; }
             if (DateTime.Now < _navDislodgeUntil) return false;   // mid-dislodge; give it a beat
             Vector3 pos = _copCar.Position;
-            if (_navAnchorAt == DateTime.MinValue) { _navAnchor = pos; _navAnchorAt = DateTime.Now; return false; }
-            if (pos.DistanceTo(_navAnchor) > NavProgressMeters) { _navAnchor = pos; _navAnchorAt = DateTime.Now; return false; } // progress
+            if (_copCar.Speed > 3f) _navMoved = true;             // it was actually moving this window
+            if (_navAnchorAt == DateTime.MinValue) { _navAnchor = pos; _navAnchorAt = DateTime.Now; _navMoved = false; return false; }
+            if (pos.DistanceTo(_navAnchor) > NavProgressMeters) { _navAnchor = pos; _navAnchorAt = DateTime.Now; _navMoved = false; return false; } // progress
             if ((DateTime.Now - _navAnchorAt).TotalSeconds < NavWindowSeconds) return false;             // not long enough yet
             _navAnchor = pos; _navAnchorAt = DateTime.Now;        // reset the window for the next check
+            _navWasMoving = _navMoved; _navMoved = false;
             return true;
+        }
+
+        // Should a stuck car get the backward pop, or just a fresh route? Reverse ONLY when it
+        // was actually grinding/oscillating, or the engine reports it jammed -- NOT when it's
+        // sitting still for a red light or traffic. That distinction is what stops the cruiser
+        // from randomly reversing at lights with the player aboard; a parked-and-waiting car
+        // just gets re-planned (harmless), while a wedged one gets freed.
+        private bool NavShouldReverse()
+        {
+            if (_navWasMoving) return true;
+            return Valid(_copCar) && Function.Call<bool>(Hash.IS_VEHICLE_STUCK_TIMER_UP, _copCar, 3, 3000); // 3 = jammed
         }
 
         // Break contact with whatever the car is wedged on: a brief, deterministic backward
@@ -526,6 +541,7 @@ namespace QualifiedImmunity
             Function.Call(Hash.SET_PED_AS_COP, _driver, false);
             Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, _driver, _copCar, 3, 1300);   // reverse (best-effort)
             Function.Call(Hash.SET_VEHICLE_FORWARD_SPEED, _copCar, -5f);               // guaranteed backward pop
+            Function.Call(Hash.RESET_VEHICLE_STUCK_TIMER, _copCar, 0);                 // clear the jammed timer we just acted on
             _navDislodgeUntil = DateTime.Now.AddSeconds(1.4);
         }
 
@@ -1539,7 +1555,7 @@ namespace QualifiedImmunity
                         // driver is behind the wheel -- handing a vehicle task to a driver
                         // who's OUT (playing medic for a downed squadmate) yanks him back.
                         bool drvSeated = Valid(_driver) && _driver.IsInVehicle(_copCar);
-                        if (drvSeated && NavStuck()) { NavDislodge(); _lastWander = DateTime.MinValue; }
+                        if (drvSeated && NavStuck()) { if (NavShouldReverse()) NavDislodge(); _lastWander = DateTime.MinValue; }
                         if (drvSeated && DateTime.Now >= _navDislodgeUntil
                             && (CarStalled() || _lastWander == DateTime.MinValue
                                 || (DateTime.Now - _lastWander).TotalSeconds > 6.0))
