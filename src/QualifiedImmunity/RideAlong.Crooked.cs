@@ -91,8 +91,13 @@ namespace QualifiedImmunity
                 return;
             }
 
-            // Same stall re-kick used everywhere else.
-            if (CarStalled() && (DateTime.Now - _lastReissue).TotalSeconds > 3.0)
+            // Same stall re-kick + stuck-breaker used everywhere else: a stalled OR
+            // wedged-and-grinding agent gets popped loose and re-routed to the deal spot.
+            bool driverAboard = Valid(_driver) && _driver.IsInVehicle(_copCar);
+            bool stuck = driverAboard && NavStuck();
+            if (stuck) { if (NavShouldReverse()) NavDislodge(); _lastReissue = DateTime.MinValue; }
+            if ((CarStalled() || stuck) && DateTime.Now >= _navDislodgeUntil
+                && (DateTime.Now - _lastReissue).TotalSeconds > 3.0)
             {
                 _lastReissue = DateTime.Now;
                 Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE, _driver, _copCar,

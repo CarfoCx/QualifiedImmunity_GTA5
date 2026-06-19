@@ -62,7 +62,14 @@ namespace QualifiedImmunity
                 // Re-kick the drive only when the car has actually stalled (same guard
                 // used in pursuit/en-route). Re-issuing DRIVE_TO_COORD on a moving car
                 // restarts the task mid-frame and causes lurching / momentary braking.
-                if (CarStalled() && (DateTime.Now - _lastReissue).TotalSeconds > 2.5)
+                // The stuck-breaker also runs here: rolling to a threat is just another
+                // "navigate to a destination", so a cruiser grinding on an obstacle on the
+                // way gets popped loose and re-routed instead of derby-ing it.
+                bool driverAboard = Valid(_driver) && _driver.IsInVehicle(_copCar);
+                bool stuck = driverAboard && NavStuck();
+                if (stuck) { if (NavShouldReverse()) NavDislodge(); _lastReissue = DateTime.MinValue; }
+                if ((CarStalled() || stuck) && DateTime.Now >= _navDislodgeUntil
+                    && (DateTime.Now - _lastReissue).TotalSeconds > 2.5)
                 {
                     _lastReissue = DateTime.Now;
                     DriveToThreat();
