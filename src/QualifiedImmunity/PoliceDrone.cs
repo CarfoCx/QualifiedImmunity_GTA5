@@ -55,7 +55,7 @@ namespace QualifiedImmunity
         private int _strikePrice = 7500;
         private int _bomberPrice = 12000;
         private int _budgetPrice = 2000;          // dirt-cheap low-res FPV
-        private float _shopRange = 20f;           // m from an Ammu-Nation blip to reach the "counter"
+        private float _shopRange = 30f;           // m from an Ammu-Nation to reach the "counter" (covers the shop floor)
         private Keys _shopKey = Keys.E;           // open the UAS counter when stood in a gun store
         private Keys _budgetKey = Keys.F6;        // launch / recall the low-res budget FPV
         private int _strikeStock;                 // FPV strike airframes owned (this session)
@@ -534,10 +534,33 @@ namespace QualifiedImmunity
                      0.5f, 0.86f, 0.42f, 245, 245, 245, true);
         }
 
-        // Nearest Ammu-Nation within reach? Found via the store's static map blip so we
-        // don't depend on a hand-maintained coordinate list that could drift out of date.
+        // Every Ammu-Nation store counter in GTA V. The blip-only scan we used before
+        // didn't reliably flag a store you were standing in (tight radius, and store blips
+        // aren't always enumerable), so the UAS counter never showed. This fixed list is
+        // the reliable primary check; the blip scan stays as a fallback for added stores.
+        private static readonly Vector3[] AmmuNations =
+        {
+            new Vector3(21.7f,    -1107.3f, 29.8f),    // Little Seoul
+            new Vector3(810.2f,   -2157.6f, 29.6f),    // Cypress Flats
+            new Vector3(1693.4f,   3760.2f, 34.7f),    // Sandy Shores
+            new Vector3(-330.2f,   6083.9f, 31.5f),    // Paleto Bay
+            new Vector3(252.6f,     -50.0f, 69.9f),    // Downtown Vinewood
+            new Vector3(-662.1f,   -935.3f, 21.8f),    // Pillbox Hill
+            new Vector3(-1305.3f,  -394.0f, 36.7f),    // Morningwood
+            new Vector3(-1117.6f,  2698.6f, 18.6f),    // Route 68 (Tongva)
+            new Vector3(2567.9f,    294.4f, 108.7f),   // Tataviam Mountains
+            new Vector3(-3172.5f,  1085.0f, 20.8f),    // Chumash
+        };
+
+        // Standing in (or right outside) any Ammu-Nation? Hardcoded counters first --
+        // reliable regardless of blip state -- then the map-blip scan as a fallback so
+        // DLC/added stores still work. A generous radius so you trigger anywhere inside
+        // the shop floor, not only on the exact counter tile.
         private bool NearAmmuNation(Vector3 from)
         {
+            foreach (Vector3 store in AmmuNations)
+                if (store.DistanceTo(from) <= _shopRange) return true;
+
             foreach (Blip b in World.GetAllBlips())
             {
                 if (b == null || !b.Exists()) continue;

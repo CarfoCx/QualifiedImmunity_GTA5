@@ -526,8 +526,17 @@ namespace QualifiedImmunity
         private void TuneDriver(Ped d)
         {
             if (!Valid(d)) return;
-            Function.Call(Hash.SET_DRIVER_ABILITY, d, 1.0f);          // skilled -- handles traffic cleanly
+            Function.Call(Hash.SET_DRIVER_ABILITY, d, 1.0f);          // max skill -- handles traffic cleanly
             Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, d, 0.35f);  // calmer -- fewer collisions
+            // Full professional profile: actively steer around everything so the cruiser
+            // threads traffic/props/peds instead of clipping them (these flags were on the
+            // ride-along + EMS drivers but were missing here, so ambient cops drove worse).
+            Function.Call(Hash.SET_PED_STEERS_AROUND_VEHICLES, d, true);
+            Function.Call(Hash.SET_PED_STEERS_AROUND_OBJECTS, d, true);
+            Function.Call(Hash.SET_PED_STEERS_AROUND_PEDS, d, true);
+            // Follow the road network, not navmesh shortcuts over sidewalks/terrain
+            // (69 = PreferNavmeshInChase).
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, d, 69, false);
             Function.Call(Hash.SET_DRIVE_TASK_DRIVING_STYLE, d, DriveStyleAvoid);
         }
 

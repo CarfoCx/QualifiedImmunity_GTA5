@@ -35,8 +35,8 @@ namespace QualifiedImmunity
             _camToggleFrame = Function.Call<int>(Hash.GET_FRAME_COUNT);
             if (_newsCam != null)
             {
+                // Cutting back to the normal view is a silent toggle -- no on-screen line.
                 StopNewsCam();
-                Notify("~g~You:~w~ Cutting the feed - back to bodycam.");
                 return;
             }
 

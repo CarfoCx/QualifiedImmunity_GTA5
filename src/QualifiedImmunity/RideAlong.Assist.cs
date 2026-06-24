@@ -238,6 +238,7 @@ namespace QualifiedImmunity
 
         private void HandleClearing(Ped player)
         {
+            SettleCrew();   // hold boarded officers in their seats during the scene-clear pause
             // A lull is NOT the all-clear. If anyone hostile is still up and fighting
             // (the perp reloading behind cover reads as "not in combat" for a beat),
             // jump straight back into the engagement instead of standing by and then
@@ -293,12 +294,11 @@ namespace QualifiedImmunity
                 if (t != null) { Notify("~b~Officer:~w~ Clear. New contact - moving up!"); StartAssist(t); return; }
             }
 
-            // ...otherwise resume patrol, or end if the player has wandered off.
+            // ...otherwise resume patrol, or end ONLY if the player has genuinely left the
+            // area (wide leash -- stepping out to watch the cops work never ends the ride).
             if (!player.IsInVehicle(_copCar))
             {
-                if (!Valid(_driver) || _copCar.Position.DistanceTo(player.Position) > 35f
-                    || SecondsInPhase > _clearDelay + 20)
-                { Notify("~y~Ride-along ended."); Cleanup(); }
+                if (PlayerLeftUnit(player)) { Notify("~y~Ride-along ended."); Cleanup(); }
                 return;
             }
             if (Valid(_driver) && _driver.IsInVehicle(_copCar))
@@ -318,6 +318,7 @@ namespace QualifiedImmunity
         private void HandleRegroup(Ped player)
         {
             DespawnPursuitProps();
+            SettleCrew();   // keep already-boarded officers from hopping back out
 
             // Keep the cruiser STILL while the crew walks back in. The walk-in stalled
             // (and then "teleported") mainly because the seated driver let the car idle
@@ -386,9 +387,9 @@ namespace QualifiedImmunity
                 else if (SecondsInPhase < 0.3 || (DateTime.Now - _lastReboardPrompt).TotalSeconds > 9.0)
                     Notify("~b~Dispatch:~w~ Your unit's holding for you - walk back and get in (" + SeatName(_playerSeat) + ").");
 
-                bool walkedOff = gap > 70f;                         // clearly left the scene
-                bool idledOut  = gap > 25f && SecondsInPhase > 240;  // away from the car for 4 min
-                if (walkedOff || idledOut)
+                // Ends ONLY once you've genuinely walked away from the unit (wide leash) or
+                // cancel manually -- never on a timer, and never while you're near the car.
+                if (PlayerLeftUnit(player))
                 { Notify("~y~Ride-along ended."); Cleanup(); }
                 return;
             }

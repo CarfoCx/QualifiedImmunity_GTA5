@@ -98,6 +98,10 @@ namespace QualifiedImmunity
                 if (v == exclude1 || v == exclude2) continue;
                 if (player != null && player.IsInVehicle(v)) continue;
                 if (!Function.Call<bool>(Hash.IS_VEHICLE_DRIVEABLE, v, false)) continue;
+                // Ground cruisers can't chase a helicopter/plane/boat/train -- never
+                // designate a flying or floating vehicle as the suspect (the chasing
+                // crew just sits there, unable to follow it).
+                if (!Cops.IsGroundPursuitVehicle(v)) continue;
 
                 Ped d = v.Driver;
                 if (d == null || !d.Exists() || d.IsDead || d == player) continue;

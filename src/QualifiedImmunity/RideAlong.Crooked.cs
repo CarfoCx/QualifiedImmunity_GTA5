@@ -72,7 +72,7 @@ namespace QualifiedImmunity
 
         private void HandleDealDrive(Ped player)
         {
-            if (!player.IsInVehicle(_copCar))
+            if (PlayerLeftUnit(player))
             { Notify("~y~You walked out on a federal 'errand'. Ride over. You were never here."); Cleanup(); return; }
 
             if (_copCar.Position.DistanceTo(_dealSpot) < 25f)

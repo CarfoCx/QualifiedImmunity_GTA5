@@ -180,6 +180,7 @@ namespace QualifiedImmunity
         private DateTime _lastPit = DateTime.MinValue;
         private DateTime _suspectStoppedSince = DateTime.MinValue; // when the fleeing car actually stopped
         private DateTime _suspectRollingSince = DateTime.MinValue; // when a parked/engaged suspect car started genuinely rolling again
+        private DateTime _engagedSince = DateTime.MinValue;        // when the on-foot firefight began (gates the resume-pursuit re-board)
         private DateTime _lastCollateral = DateTime.MinValue;
         private DateTime _lastProgress = DateTime.MinValue;   // en-route stuck/fail detection
         private float _lastEnRouteDist = float.MaxValue;       // track closing distance, not just speed
@@ -336,12 +337,15 @@ namespace QualifiedImmunity
         private const int DRIVE_STYLE = 786603;
 
         // PURSUIT style for OUR officers: weave through traffic and run lights, but
-        // with every avoidance flag on -- swerve moving cars (4), steer around
-        // parked/empty cars (8), peds (16) and objects (32), and allow wrong-way
-        // (512) so the AI holds speed instead of snapping lanes into obstacles.
-        // (The old 786468 only avoided moving cars + objects, which is why chase
-        // cruisers clipped parked cars and street furniture.)
-        private const int RIDE_DRIVE_STYLE = 787004;
+        // with every avoidance flag on -- brake-for-vehicles (1) so the cruiser slows
+        // behind a car it can't get around instead of plowing its rear, swerve moving
+        // cars (4), steer around parked/empty cars (8), peds (16) and objects (32),
+        // and allow wrong-way (512) so the AI holds speed instead of snapping lanes
+        // into obstacles. (The old 786468 only avoided moving cars + objects, which is
+        // why chase cruisers clipped parked cars; and WITHOUT the brake-for-vehicles
+        // bit the capped-speed cruiser still rear-ended traffic it couldn't swerve
+        // past -- swerve alone has no fallback when the lane ahead is blocked.)
+        private const int RIDE_DRIVE_STYLE = 787005;
 
         // FLEE style for suspects: the old, sloppier avoidance set. Fleeing perps
         // are SUPPOSED to clip mirrors and eat fences; the precision is for cops.
@@ -486,6 +490,47 @@ namespace QualifiedImmunity
         // True when the cruiser hasn't moved for a few seconds -- our cue to (re)issue
         // a drive/chase task. A moving cruiser is left alone so its task isn't restarted.
         private bool CarStalled() { return (DateTime.Now - _lastCarMoving).TotalSeconds > 3.5; }
+
+        // On-foot leash: how far the player can roam from their unit before the ride-along
+        // ends on its own. Deliberately WIDE so you can hop out and follow the crew into a
+        // gunfight or down the block without it cancelling -- it ends only when you've
+        // genuinely walked away from the car, or you cancel it manually.
+        private const float AbandonDistance = 130f;
+
+        // True when the player is on foot AND has left the area around their unit, so the
+        // ride should wrap up. Out of the car but still NEAR it never ends the ride -- the
+        // unit just holds for you. This is the single rule every phase uses to decide
+        // whether stepping out should end the ride.
+        private bool PlayerLeftUnit(Ped player)
+        {
+            if (player == null) return false;
+            if (player.IsInVehicle(_copCar)) return false;
+            if (!Valid(_copCar)) return true;   // no unit left to climb back into
+            return _copCar.Position.DistanceTo(player.Position) > AbandonDistance;
+        }
+
+        // Keep the aboard crew settled in their seats. A cop who has climbed back in but
+        // still carries police-dispatch AI (or unblocked ambient events) will immediately
+        // bail out again to "do cop things" -- THE get-in/get-out oscillation seen when the
+        // unit is just sitting/patrolling and NOT chasing anyone. Re-asserting these every
+        // tick on each SEATED officer holds them put. StartPursuit/StartAssist/ForceOut...
+        // clear the block when it's actually time to pile out and fight.
+        private void SettleCrew()
+        {
+            SettleOne(_driver);
+            SettleOne(_partner);
+            foreach (Ped sq in _squad) SettleOne(sq);
+        }
+
+        private void SettleOne(Ped c)
+        {
+            if (!Valid(c) || c == _medicCop) return;       // a cop out playing medic is meant to be out
+            if (!c.IsInVehicle(_copCar)) return;            // only pin the ones actually aboard
+            Function.Call(Hash.SET_PED_AS_COP, c, false);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, c, CA_CanLeaveVehicle, false);
+            Function.Call(Hash.SET_PED_KEEP_TASK, c, false);
+            Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, c, true);
+        }
 
         // -------------------------------------------------------------------
         // Systematic stuck-breaker. The classic AI failure -- ram an obstacle, reverse,
@@ -1531,6 +1576,9 @@ namespace QualifiedImmunity
                 case Phase.Riding:
                     {
                         if (!player.IsInVehicle(_copCar)) { SetPhase(Phase.Regroup); return; }
+                        // Hold the seated crew in place so nobody randomly hops out and back
+                        // in while we're just patrolling (the get-in/get-out loop).
+                        SettleCrew();
                         // DEBOUNCED re-seat: warping the driver back every single frame is
                         // what turns a brief bail into the violent get-in/get-out loop (and
                         // resets the drive task each time). Only re-seat if they've actually
@@ -1565,8 +1613,11 @@ namespace QualifiedImmunity
                         }
 
                         // The crooked agent does NOT respond to crime. Crime is the
-                        // customer base.
-                        if (!_crookedAgent && (DateTime.Now - _lastEngageScan).TotalSeconds > 1.5)
+                        // customer base. Everyone else scans on a tight ~0.4s cadence so a
+                        // crime that breaks out nearby gets an INSTANT lights-and-siren
+                        // response (StartAssist/StartPursuit flip the siren on immediately)
+                        // instead of the unit cruising past for a second or two first.
+                        if (!_crookedAgent && (DateTime.Now - _lastEngageScan).TotalSeconds > 0.4)
                         {
                             _lastEngageScan = DateTime.Now;
                             Ped engagedCop = FindNearbyEngagedCop(ENGAGEMENT_SEEK_RADIUS);
@@ -1622,7 +1673,7 @@ namespace QualifiedImmunity
 
                 case Phase.Pursuit:
                     {
-                        if (!_engaged && !player.IsInVehicle(_copCar)) { Notify("~y~You left the unit. Ride-along over."); Cleanup(); return; }
+                        if (!_engaged && PlayerLeftUnit(player)) { Notify("~y~You left the unit. Ride-along over."); Cleanup(); return; }
                         
                         Ped aliveSusp = AliveSuspect();
                         if (!Valid(_suspectCar) || aliveSusp == null)

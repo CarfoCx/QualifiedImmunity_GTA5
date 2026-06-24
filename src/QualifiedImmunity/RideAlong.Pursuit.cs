@@ -246,7 +246,16 @@ namespace QualifiedImmunity
                 bool ownCarRolling = _suspectRollingSince != DateTime.MinValue
                                      && (DateTime.Now - _suspectRollingSince).TotalSeconds > 1.2;
 
-                if (aliveSusp != null && (newRide || ownCarRolling))
+                // Extra guards on the OWN-CAR resume only (the jacked-a-NEW-car path is
+                // an unambiguous getaway and stays instant). Don't re-board for a car
+                // that's merely twitching at the scene: require a beat since we engaged
+                // AND the car to have actually pulled clear. A suspect car bumped in
+                // place by gunfire/PIT impacts/throttle taps stays close, so it no longer
+                // yo-yos the officers in and out of the cruiser mid-firefight.
+                bool engagedSettled = (DateTime.Now - _engagedSince).TotalSeconds > 3.0;
+                bool pulledAway = Valid(ride) && ride.Position.DistanceTo(_copCar.Position) > _engageDistanceThreshold + 8f;
+
+                if (aliveSusp != null && (newRide || (ownCarRolling && engagedSettled && pulledAway)))
                 {
                     _suspectRollingSince = DateTime.MinValue;
                     _engaged = false;
@@ -360,6 +369,7 @@ namespace QualifiedImmunity
             CopBark(_driver, "GENERIC_WAR_CRY");
             CopBark(_partner, "GENERIC_INSULT_HIGH");
             _pitting = false;
+            _engagedSince = DateTime.Now;   // gate the resume-pursuit re-board for a beat
             _rideHadFight = true;   // the banter can reference the shooting now
             ForceOutAndFight(_driver);
             ForceOutAndFight(_partner);
@@ -395,6 +405,14 @@ namespace QualifiedImmunity
                     Function.Call(Hash.TASK_SMART_FLEE_PED, s, _driver, 250.0f, -1, false, false);
                 else
                 {
+                    // Commit the armed suspect to the on-foot fight: bail him OUT of his
+                    // own getaway car, then engage. Leaving him seated in a driveable car
+                    // was the root of the "officers cycle in and out of the cruiser" glitch
+                    // -- the parked car crept from impacts/throttle and the resume-pursuit
+                    // check kept re-tripping. CanUseVehicles=false forces him out (so the
+                    // car goes still), CanLeaveVehicle=true permits it.
+                    Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, s, CA_CanUseVehicles, false);
+                    Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, s, CA_CanLeaveVehicle, true);
                     Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, s, CA_AlwaysFight, true);
                     Function.Call(Hash.TASK_COMBAT_PED, s, _driver, 0, 16);
                 }
@@ -654,7 +672,7 @@ namespace QualifiedImmunity
 
         private void HandleUCDrive(Ped player)
         {
-            if (!player.IsInVehicle(_copCar))
+            if (PlayerLeftUnit(player))
             { Notify("~y~You left the unit mid-operation. Sting's blown. Ride over."); Cleanup(); return; }
 
             float d = _copCar.Position.DistanceTo(_ucScene);
@@ -684,7 +702,7 @@ namespace QualifiedImmunity
 
         private void HandleUCStake(Ped player)
         {
-            if (!player.IsInVehicle(_copCar))
+            if (PlayerLeftUnit(player))
             { Notify("~y~You left the unit mid-operation. Sting's blown. Ride over."); Cleanup(); return; }
 
             // A short, tense beat... then the signal.
@@ -722,6 +740,7 @@ namespace QualifiedImmunity
             }
 
             _engaged = true;
+            _engagedSince = DateTime.Now;   // gate the resume-pursuit re-board for a beat
             _rideHadFight = true; _rideHadPursuit = true;
             ForceOutAndFight(_driver);
             ForceOutAndFight(_partner);

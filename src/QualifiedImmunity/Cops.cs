@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using GTA;
+using GTA.Native;
 
 namespace QualifiedImmunity
 {
@@ -36,6 +37,17 @@ namespace QualifiedImmunity
             if (v == null || !v.Exists()) return false;
             if (PoliceModels.Contains((VehicleHash)v.Model.Hash)) return true;
             return IsCop(v.Driver);
+        }
+
+        // A vehicle a GROUND cruiser can actually pursue. Excludes anything that flies,
+        // floats, or rides rails: GET_VEHICLE_CLASS 14 = boats, 15 = helicopters,
+        // 16 = planes, 21 = trains. (THE "the suspect was a helicopter and the cops just
+        // sat there" bug -- a fleeing aircraft must never be designated as a chase target.)
+        public static bool IsGroundPursuitVehicle(Vehicle v)
+        {
+            if (v == null || !v.Exists()) return false;
+            int cls = Function.Call<int>(Hash.GET_VEHICLE_CLASS, v);
+            return cls != 14 && cls != 15 && cls != 16 && cls != 21;
         }
     }
 }
